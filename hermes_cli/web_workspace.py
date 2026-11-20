@@ -117,6 +117,14 @@ class WorkspaceStore:
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS inbox_created_idx ON inbox(created_at DESC);
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    backend TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS chat_messages_id_idx ON chat_messages(id);
                 """
             )
             # Migrate databases created before soft delete existed.
@@ -234,6 +242,7 @@ class WorkspaceStore:
             "exported_at": _now(),
             "notes": self.list_notes(include_content=True),
             "inbox": self.list_inbox(),
+            "chat": self.list_chat_messages(),
         }
 
     def import_notes(self, notes: Any) -> int:
@@ -341,6 +350,38 @@ class WorkspaceStore:
                 raise RuntimeError("version conflict")
             self._db.execute("DELETE FROM notes WHERE id=?", (note_id,))
         return True
+
+    def append_chat_message(self, role: str, content: str, backend: str = "") -> dict[str, Any]:
+        role = _clean_text(role, "role", 16)
+        if role not in {"user", "assistant", "system"}:
+            raise ValueError("role must be user, assistant, or system")
+        content = _clean_text(content, "content", MAX_CONTENT)
+        timestamp = _now()
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                "INSERT INTO chat_messages(role,content,backend,created_at) VALUES(?,?,?,?)",
+                (role, content, backend, timestamp),
+            )
+        return {
+            "id": cursor.lastrowid,
+            "role": role,
+            "content": content,
+            "backend": backend,
+            "created_at": timestamp,
+        }
+
+    def list_chat_messages(self, limit: int = 100) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        rows = self._db.execute(
+            "SELECT id,role,content,backend,created_at FROM chat_messages ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def clear_chat(self) -> int:
+        with self._lock, self._db:
+            cursor = self._db.execute("DELETE FROM chat_messages")
+        return int(cursor.rowcount or 0)
 
     def create_inbox_item(self, text: str) -> dict[str, Any]:
         text = _clean_text(text, "text", 10_000)
@@ -506,16 +547,16 @@ _HTML_PAGE = r"""<!doctype html>
 </head>
 <body>
 <div class="shell">
-<nav class="rail"><h1 class="brand">Hermes</h1><button class="active" data-panel="notes">Notes</button><button data-panel="inbox">Inbox</button><button data-panel="trash">Trash</button><button data-panel="sessions">Sessions</button><button data-panel="terminal">Terminal</button><button data-panel="system">System</button><div class="status" id="status">Connecting…</div></nav>
+<nav class="rail"><h1 class="brand">Hermes</h1><button class="active" data-panel="notes">Notes</button><button data-panel="chat">Chat</button><button data-panel="inbox">Inbox</button><button data-panel="trash">Trash</button><button data-panel="sessions">Sessions</button><button data-panel="terminal">Terminal</button><button data-panel="system">System</button><div class="status" id="status">Connecting…</div></nav>
 <section class="list" id="list-panel"><div class="list-head"><input id="note-search" placeholder="Search notes"></div><div class="list-head"><select id="note-tag-filter"><option value="">All tags</option></select><select id="note-sort"><option value="updated">Recently updated</option><option value="created">Newest first</option><option value="title">Title A–Z</option></select></div><div id="note-list"></div></section>
 <section class="editor" id="editor-panel">
-<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button><button id="export-notes">Export</button><label class="import-label">Import<input id="import-notes" type="file" accept="application/json,.json"></label></div><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
+<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button><button id="ask-about-note">Ask about this note</button><button id="export-notes">Export</button><label class="import-label">Import<input id="import-notes" type="file" accept="application/json,.json"></label></div><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
 <div id="inbox-view" hidden><h1>Inbox</h1><div id="inbox-list"></div></div>
 <div id="trash-view" hidden><h1>Trash</h1><p class="muted">Deleted notes stay here until you purge them.</p><div id="trash-list"></div></div>
 <div id="sessions-view" hidden><h1>Recent sessions</h1><div id="sessions-list"></div></div>
 <div id="terminal-view" hidden><h1>Read-only terminal</h1><div class="toolbar"><input id="term-input" value="pwd"><button id="run-term">Run</button></div><pre id="term-output" class="term"></pre></div>
 <div id="system-view" hidden><h1>System</h1><pre id="system-output" class="term"></pre></div>
-<div id="chat-view" hidden><h1>Chat</h1><div id="chat-log" class="chat-log"></div><form id="chat-form" class="chat-form"><input id="chat-input" placeholder="Ask Hermes…"><button class="primary">Send</button></form></div>
+<div id="chat-view" hidden><h1>Chat <button id="clear-chat" style="font-size:12px">Clear history</button></h1><div id="chat-context" class="muted"></div><div id="chat-log" class="chat-log"></div><form id="chat-form" class="chat-form"><input id="chat-input" placeholder="Ask Hermes…"><button class="primary">Send</button></form></div>
 </section></div>
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
@@ -535,10 +576,15 @@ async function selectNote(id){selected=id;const {note}=await api('/api/notes/'+i
 async function saveNote(){if(!$('#note-title').value.trim())return showError(new Error('Title is required'));const wasNew=!selected;const body={title:$('#note-title').value,content:$('#note-content').value,tags:$('#note-tags').value.split(',').map(x=>x.trim()).filter(Boolean),version};if(selected){const {note}=await api('/api/notes/'+selected,{method:'PUT',body:JSON.stringify(body)});version=note.version;$('#note-preview').innerHTML=note.html;}else{const {note}=await api('/api/notes',{method:'POST',body:JSON.stringify(body)});selected=note.id;version=note.version;$('#note-preview').innerHTML=note.html;}clearDraft();if(wasNew){try{localStorage.removeItem('workspace-draft-new');}catch(e){}}await loadNotes();$('#status').textContent='Saved';$('#status').className='status success';}
 async function newNote(){selected=null;version=1;$('#note-title').value='';$('#note-tags').value='';$('#note-content').value='';$('#note-preview').innerHTML='';clearDraft();}
 async function deleteNote(){if(!selected||!confirm('Move this note to trash?'))return;try{await api('/api/notes/'+selected,{method:'DELETE',body:JSON.stringify({version})});await newNote();await loadNotes();$('#status').textContent='Moved to trash';$('#status').className='status success';}catch(e){showError(e);}}
-async function switchPanel(name){$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','inbox','trash','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;$('#list-panel').hidden=name!=='notes';if(name==='inbox'){$('#inbox-list').innerHTML=(await api('/api/inbox')).items.map(i=>`<p>${esc(i.text)} <small class="muted">${esc(i.status)}</small></p>`).join('');}if(name==='trash'){const notes=(await api('/api/trash')).notes;$('#trash-list').innerHTML=notes.map(n=>`<div class="note-card"><strong>${esc(n.title)}</strong><small class="muted">deleted ${esc(n.deleted_at||'')}</small><div><button data-restore="${esc(n.id)}" data-version="${n.version}">Restore</button> <button data-purge="${esc(n.id)}" data-version="${n.version}">Purge</button></div></div>`).join('')||'<p class="muted">Trash is empty.</p>';$$('#trash-list [data-restore]').forEach(b=>b.onclick=async()=>{await api('/api/notes/'+b.dataset.restore+'/restore',{method:'POST',body:JSON.stringify({version:Number(b.dataset.version)})});await loadNotes();await switchPanel('trash');});$$('#trash-list [data-purge]').forEach(b=>b.onclick=async()=>{if(!confirm('Permanently delete this note?'))return;await api('/api/notes/'+b.dataset.purge+'/purge',{method:'DELETE',body:JSON.stringify({version:Number(b.dataset.version)})});await switchPanel('trash');});}if(name==='sessions'){$('#sessions-list').innerHTML=(await api('/api/sessions')).sessions.map(s=>`<p>${esc(s.title||s.id)} <small class="muted">${esc(s.source||'')}</small></p>`).join('');}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
+async function switchPanel(name){$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','chat','inbox','trash','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;if(name==='chat'){await renderChatHistory();}$('#list-panel').hidden=name!=='notes';if(name==='inbox'){$('#inbox-list').innerHTML=(await api('/api/inbox')).items.map(i=>`<p>${esc(i.text)} <small class="muted">${esc(i.status)}</small></p>`).join('');}if(name==='trash'){const notes=(await api('/api/trash')).notes;$('#trash-list').innerHTML=notes.map(n=>`<div class="note-card"><strong>${esc(n.title)}</strong><small class="muted">deleted ${esc(n.deleted_at||'')}</small><div><button data-restore="${esc(n.id)}" data-version="${n.version}">Restore</button> <button data-purge="${esc(n.id)}" data-version="${n.version}">Purge</button></div></div>`).join('')||'<p class="muted">Trash is empty.</p>';$$('#trash-list [data-restore]').forEach(b=>b.onclick=async()=>{await api('/api/notes/'+b.dataset.restore+'/restore',{method:'POST',body:JSON.stringify({version:Number(b.dataset.version)})});await loadNotes();await switchPanel('trash');});$$('#trash-list [data-purge]').forEach(b=>b.onclick=async()=>{if(!confirm('Permanently delete this note?'))return;await api('/api/notes/'+b.dataset.purge+'/purge',{method:'DELETE',body:JSON.stringify({version:Number(b.dataset.version)})});await switchPanel('trash');});}if(name==='sessions'){$('#sessions-list').innerHTML=(await api('/api/sessions')).sessions.map(s=>`<p>${esc(s.title||s.id)} <small class="muted">${esc(s.source||'')}</small></p>`).join('');}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
 $('#note-tag-filter').onchange=()=>loadNotes().catch(showError);$('#note-sort').onchange=()=>loadNotes().catch(showError);$('#export-notes').onclick=async()=>{try{const data=await api('/api/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='hermes-workspace.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#status').textContent='Exported '+data.notes.length+' notes';$('#status').className='status success';}catch(e){showError(e);}};$('#import-notes').onchange=async e=>{const file=e.target.files&&e.target.files[0];if(!file)return;try{const payload=JSON.parse(await file.text());const result=await api('/api/import',{method:'POST',body:JSON.stringify({notes:payload.notes||payload})});await loadTags();await loadNotes();$('#status').textContent='Imported '+result.imported+' notes';$('#status').className='status success';}catch(err){showError(err);}e.target.value='';};$('#save-note').onclick=()=>saveNote().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);$('#note-title').oninput=saveDraft;$('#note-tags').oninput=saveDraft;let previewTimer=null;$('#note-content').oninput=()=>{saveDraft();clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
+let pendingChatContext='';
+async function renderChatHistory(){const data=await api('/api/chat');$('#chat-log').innerHTML=data.messages.map(m=>`<p><b>${m.role==='assistant'?'Hermes':'You'}:</b> ${esc(m.content)}</p>`).join('');$('#chat-log').scrollTop=$('#chat-log').scrollHeight;}
+function noteContext(){const title=$('#note-title').value.trim();const body=$('#note-content').value;if(!title&&!body.trim())return '';return title+'\n\n'+body;}
+$('#ask-about-note').onclick=async()=>{pendingChatContext=noteContext();if(!pendingChatContext){showError(new Error('Write or select a note first'));return;}$('#chat-context').textContent='Context: the current note will be shared with your next message.';$('#chat-input').placeholder='Ask about this note…';await switchPanel('chat');$('#chat-input').focus();};
+$('#clear-chat').onclick=async()=>{await api('/api/chat',{method:'DELETE'});await renderChatHistory();};
 $('#run-term').onclick=()=>api('/api/terminal',{method:'POST',body:JSON.stringify({input:$('#term-input').value})}).then(r=>$('#term-output').textContent=r.output).catch(showError);
-$('#chat-form').onsubmit=async e=>{e.preventDefault();const input=$('#chat-input');const text=input.value;if(!text.trim())return;$('#chat-log').insertAdjacentHTML('beforeend','<p><b>You:</b> '+esc(text)+'</p>');input.value='';try{const r=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text})});$('#chat-log').insertAdjacentHTML('beforeend','<p><b>Hermes:</b> '+esc(r.reply)+'</p>');}catch(e){$('#chat-log').insertAdjacentHTML('beforeend','<p class="error">'+esc(e.message)+'</p>');}};
+$('#chat-form').onsubmit=async e=>{e.preventDefault();const input=$('#chat-input');const text=input.value;if(!text.trim())return;$('#chat-log').insertAdjacentHTML('beforeend','<p><b>You:</b> '+esc(text)+'</p>');input.value='';const context=pendingChatContext;pendingChatContext='';$('#chat-context').textContent='';try{const r=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,context})});$('#chat-log').insertAdjacentHTML('beforeend','<p><b>Hermes:</b> '+esc(r.reply)+'</p>');}catch(e){$('#chat-log').insertAdjacentHTML('beforeend','<p class="error">'+esc(e.message)+'</p>');}};
 (async()=>{try{$('#status').textContent='Ready';await loadNotes();}catch(e){showError(e);}})();
 </script></body></html>"""
 
@@ -710,6 +756,9 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
             if path == "/api/system":
                 self._json(200, {"system": _system_info()})
                 return
+            if path == "/api/chat":
+                self._json(200, {"messages": self.store.list_chat_messages()})
+                return
             if path == "/api/files":
                 self._error(404, "not found")
                 return
@@ -750,7 +799,14 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 self._json(200, _bounded_terminal(data.get("input", "")))
                 return
             if path == "/api/chat":
-                self._json(200, _chat_reply(data.get("message", "")))
+                self._json(
+                    200,
+                    _chat_turn(
+                        self.store,
+                        data.get("message", ""),
+                        context=data.get("context", ""),
+                    ),
+                )
                 return
             self._error(404, "not found")
         except RuntimeError:
@@ -794,6 +850,10 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
         if not self._mutation_allowed():
             return
         try:
+            if path == "/api/chat":
+                cleared = self.store.clear_chat()
+                self._json(200, {"cleared": cleared})
+                return
             if path.startswith("/api/notes/"):
                 data = self._read_json()
                 if path.endswith("/purge"):
@@ -908,7 +968,7 @@ def _hermes_chat_command(message: str) -> list[str]:
     return [sys.executable, "-m", "hermes_cli.main", "chat", "-q", message]
 
 
-def _run_hermes_provider(message: str) -> dict[str, Any]:
+def _run_hermes_provider(messages: list[dict[str, str]]) -> dict[str, Any]:
     """Call Hermes' auxiliary LLM router inside this process.
 
     ``agent.auxiliary_client.call_llm`` resolves the user's configured
@@ -924,7 +984,7 @@ def _run_hermes_provider(message: str) -> dict[str, Any]:
         response = call_llm(
             task="workspace_chat",
             model=model,
-            messages=[{"role": "user", "content": message}],
+            messages=messages,
             timeout=120,
         )
     except Exception as exc:
@@ -962,20 +1022,29 @@ def _run_hermes_cli_chat(message: str) -> dict[str, Any]:
     return {"reply": reply, "backend": "hermes-cli"}
 
 
-def _chat_reply(message: str) -> dict[str, Any]:
-    message = _clean_text(message, "message", 100_000)
+def _last_user_message(messages: list[dict[str, str]]) -> str:
+    for item in reversed(messages):
+        if item.get("role") == "user":
+            return str(item.get("content", ""))
+    return str(messages[-1].get("content", "")) if messages else ""
+
+
+def _chat_with_messages(messages: list[dict[str, str]]) -> dict[str, Any]:
+    if not messages:
+        raise ValueError("at least one message is required")
     backend = os.environ.get("HERMES_WORKSPACE_CHAT_BACKEND", "hermes").strip().lower()
+    last_message = _last_user_message(messages)
     if backend == "cli":
-        return _run_hermes_cli_chat(message)
+        return _run_hermes_cli_chat(last_message)
     if backend in {"hermes", "auto"}:
         try:
-            return _run_hermes_provider(message)
+            return _run_hermes_provider(messages)
         except ValueError:
             if backend != "auto":
                 raise
             # ``auto`` falls through to the CLI, then to a configured HTTP key.
             try:
-                return _run_hermes_cli_chat(message)
+                return _run_hermes_cli_chat(last_message)
             except ValueError:
                 if not os.environ.get("OPENAI_API_KEY"):
                     raise
@@ -989,7 +1058,7 @@ def _chat_reply(message: str) -> dict[str, Any]:
     if not api_key:
         raise ValueError("chat is not configured: set OPENAI_API_KEY")
     payload = json.dumps(
-        {"model": model, "messages": [{"role": "user", "content": message}], "stream": False}
+        {"model": model, "messages": messages, "stream": False}
     ).encode()
     req = urllib.request.Request(
         f"{base_url}/chat/completions",
@@ -1007,6 +1076,25 @@ def _chat_reply(message: str) -> dict[str, Any]:
         raise ValueError(f"model request failed ({exc.code}): {detail}") from exc
     except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError) as exc:
         raise ValueError(f"model request failed: {exc}") from exc
+
+
+def _chat_reply(message: str) -> dict[str, Any]:
+    """Single-turn helper retained for direct callers and tests."""
+    message = _clean_text(message, "message", 100_000)
+    return _chat_with_messages([{"role": "user", "content": message}])
+
+
+def _chat_turn(store: WorkspaceStore, message: str, context: str = "") -> dict[str, Any]:
+    """Persist a chat turn, then call the provider with prior history."""
+    message = _clean_text(message, "message", 100_000)
+    context = _clean_text(context, "context", MAX_CONTENT, required=False)
+    if context:
+        store.append_chat_message("user", f"Shared note:\n{context}", backend="context")
+    store.append_chat_message("user", message)
+    history = store.list_chat_messages(limit=20)
+    result = _chat_with_messages(history)
+    store.append_chat_message("assistant", result["reply"], backend=result.get("backend", ""))
+    return result
 
 
 def make_server(

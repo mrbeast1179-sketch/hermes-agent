@@ -244,6 +244,74 @@ def test_openai_fallback_parses_provider_response(monkeypatch):
     assert captured["auth"] == "Bearer test-key"
 
 
+def _fake_provider_module(monkeypatch, reply="Reply"):
+    from types import ModuleType, SimpleNamespace
+
+    module = ModuleType("agent.auxiliary_client")
+    captured = {"calls": []}
+
+    def fake_call_llm(**kwargs):
+        captured["calls"].append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=reply))]
+        )
+
+    module.call_llm = fake_call_llm
+    package = ModuleType("agent")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "hermes")
+    return captured
+
+
+def test_chat_history_persists_across_turns(server, monkeypatch):
+    base, _ = server
+    captured = _fake_provider_module(monkeypatch, reply="First reply")
+
+    status, first, _ = request(base, "/api/chat", method="POST", payload={"message": "first question"})
+    assert status == 200
+    assert first["reply"] == "First reply"
+    assert first["backend"] == "hermes-provider"
+
+    status, _second, _ = request(base, "/api/chat", method="POST", payload={"message": "second question"})
+    assert status == 200
+    # The provider sees the prior turn plus the new question.
+    second_messages = captured["calls"][-1]["messages"]
+    assert [m["role"] for m in second_messages] == ["user", "assistant", "user"]
+    assert second_messages[0]["content"] == "first question"
+    assert second_messages[1]["content"] == "First reply"
+    assert second_messages[2]["content"] == "second question"
+
+    _, history, _ = request(base, "/api/chat")
+    assert [m["role"] for m in history["messages"]] == ["user", "assistant", "user", "assistant"]
+    assert history["messages"][-1]["content"] == "First reply"
+
+    # History is included in the workspace snapshot.
+    _, exported, _ = request(base, "/api/export")
+    assert len(exported["chat"]) == 4
+
+    status, cleared, _ = request(base, "/api/chat", method="DELETE")
+    assert status == 200
+    assert cleared["cleared"] == 4
+    _, history, _ = request(base, "/api/chat")
+    assert history["messages"] == []
+
+
+def test_chat_context_is_shared_with_provider(server, monkeypatch):
+    base, _ = server
+    captured = _fake_provider_module(monkeypatch)
+    status, _result, _ = request(base, "/api/chat", method="POST", payload={
+        "message": "summarize this", "context": "# My Note\nimportant body",
+    })
+    assert status == 200
+    messages = captured["calls"][-1]["messages"]
+    assert any("important body" in m["content"] for m in messages)
+    assert messages[-1]["content"] == "summarize this"
+    _, history, _ = request(base, "/api/chat")
+    assert any(m["backend"] == "context" for m in history["messages"])
+
+
 def test_tag_summary_and_sorting(server):
     base, _ = server
     request(base, "/api/notes", method="POST", payload={"title": "Charlie", "tags": ["alpha", "shared"]})

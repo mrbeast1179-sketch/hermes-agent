@@ -87,6 +87,18 @@ workspace never reads or stores an API key.
 `hermes chat` for this would start a second installation, which Hermes'
 shared-profile guard refuses; the in-process router avoids that entirely.
 
+The conversation is persisted in the same SQLite database, so it survives
+restarts and reloads, and it is included in the workspace export. Each turn
+sends the last 20 messages to the provider. "Ask about this note" attaches
+the current note as context for the next message; Clear history empties the
+conversation.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/chat` | Read the stored conversation |
+| `POST` | `/api/chat` | Send a message (`message`, optional `context`) |
+| `DELETE` | `/api/chat` | Clear the conversation |
+
 Optional environment overrides:
 
 | Variable | Effect |
