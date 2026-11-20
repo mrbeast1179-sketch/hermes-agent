@@ -41,4 +41,5 @@ def build_workspace_parser(subparsers, *, cmd_workspace: Callable) -> None:
     parser.add_argument(
         "--import", dest="import_file", default=None, help="import notes from a JSON backup"
     )
+    parser.add_argument("--open", dest="open_note", default=None, help="open a note by id")
     parser.set_defaults(func=cmd_workspace)

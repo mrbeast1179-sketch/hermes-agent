@@ -506,6 +506,45 @@ def _backup_args(root, **kwargs):
     return type("Args", (), values)()
 
 
+def test_inbox_item_can_be_promoted_to_a_note(server):
+    base, _ = server
+    _, created, _ = request(base, "/api/inbox", method="POST", payload={"text": "Read the paper\nwith notes"})
+    item_id = created["item"]["id"]
+
+    status, payload, _ = request(base, f"/api/inbox/{item_id}/promote", method="POST")
+    assert status == 201
+    note = payload["note"]
+    assert note["title"] == "Read the paper"
+    assert note["content"] == "Read the paper\nwith notes"
+
+    _, inbox, _ = request(base, "/api/inbox")
+    assert [item["status"] for item in inbox["items"]] == ["done"]
+    _, notes, _ = request(base, "/api/notes")
+    assert [n["title"] for n in notes["notes"]] == ["Read the paper"]
+
+    # A custom title is used when supplied.
+    _, second, _ = request(base, "/api/inbox", method="POST", payload={"text": "Another thought"})
+    status, payload, _ = request(
+        base, f"/api/inbox/{second['item']['id']}/promote", method="POST", payload={"title": "Custom"}
+    )
+    assert status == 201
+    assert payload["note"]["title"] == "Custom"
+    assert request(base, "/api/inbox/not-an-item/promote", method="POST")[0] == 404
+
+
+def test_cli_open_note_builds_a_deep_link(tmp_path: Path, capsys):
+    parser = web_workspace.build_parser()
+    args = parser.parse_args(["--open", "a" * 24, "--no-browser"])
+    assert args.open_note == "a" * 24
+
+    store = web_workspace.WorkspaceStore(tmp_path / "workspace")
+    note = store.create_note("Openable", "body")
+    store.close()
+
+    # An invalid id is rejected before the server starts.
+    assert web_workspace.run(["--root", str(tmp_path / "workspace"), "--open", "nope", "--no-browser"]) == 2
+
+
 def test_cli_export_and_import_round_trip(tmp_path: Path, capsys):
     root = tmp_path / "workspace"
     store = web_workspace.WorkspaceStore(root)

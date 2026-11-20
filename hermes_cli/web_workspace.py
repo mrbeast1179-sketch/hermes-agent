@@ -562,6 +562,14 @@ class WorkspaceStore:
             rows = self._db.execute("SELECT * FROM inbox ORDER BY created_at DESC").fetchall()
         return [dict(row) for row in rows]
 
+    def promote_inbox_item(self, item_id: str, title: str = "") -> dict[str, Any]:
+        """Turn an inbox item into a note. The item is marked done."""
+        item = self.get_inbox_item(item_id)
+        note_title = (str(title or "").strip() or item["text"].strip().splitlines()[0])[:MAX_TITLE]
+        note = self.create_note(note_title, item["text"])
+        self.update_inbox(item_id, "done")
+        return note
+
     def update_inbox(self, item_id: str, status: str) -> dict[str, Any]:
         status = _clean_text(status, "status", 32)
         if status not in {"open", "done", "archived"}:
@@ -702,7 +710,7 @@ _HTML_PAGE = r"""<!doctype html>
 <nav class="rail"><h1 class="brand">Hermes</h1><button class="active" data-panel="notes">Notes</button><button data-panel="chat">Chat</button><button data-panel="inbox">Inbox</button><button data-panel="trash">Trash</button><button data-panel="sessions">Sessions</button><button data-panel="terminal">Terminal</button><button data-panel="system">System</button><div class="status" id="status">Connecting…</div></nav>
 <section class="list" id="list-panel"><div class="list-head"><input id="note-search" placeholder="Search notes"></div><p class="list-count" id="note-count"></p><div class="list-head"><select id="note-tag-filter"><option value="">All tags</option></select><select id="note-sort"><option value="updated">Recently updated</option><option value="created">Newest first</option><option value="title">Title A–Z</option></select><button id="manage-tags" title="Rename or remove a tag">Tags</button></div><div id="note-list"></div></section>
 <section class="editor" id="editor-panel">
-<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button><button id="pin-note">Pin</button><button id="duplicate-note">Duplicate</button><button id="history-note">History</button><button id="ask-about-note">Ask about this note</button><button id="export-notes">Export</button><label class="import-label">Import<input id="import-notes" type="file" accept="application/json,.json,.md,.markdown,.txt"></label></div><p class="muted shortcuts">Shortcuts: ⌘S save · ⌘N new note · ⌘K search</p><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
+<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button><button id="pin-note">Pin</button><button id="duplicate-note">Duplicate</button><button id="history-note">History</button><button id="ask-about-note">Ask about this note</button><button id="export-notes">Export</button><label class="import-label">Import<input id="import-notes" type="file" accept="application/json,.json,.md,.markdown,.txt"></label></div><p class="muted shortcuts">Shortcuts: ⌘S save · ⌘N new · ⌘K/⌘F search · ⌘D duplicate · ⌘P pin</p><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
 <div id="inbox-view" hidden><h1>Inbox</h1><div class="toolbar"><input id="inbox-input" placeholder="Capture a thought…"><button class="primary" id="add-inbox">Add</button></div><div id="inbox-list"></div></div>
 <div id="history-view" hidden><h1>History</h1><p class="muted">Every saved version of this note.</p><div id="history-list"></div></div>
 <div id="trash-view" hidden><h1>Trash</h1><p class="muted">Deleted notes stay here until you purge them.</p><div id="trash-list"></div></div>
@@ -737,8 +745,8 @@ async function deleteNote(){if(!selected||!confirm('Move this note to trash?'))r
 let sessionsTimer=null;
 async function switchPanel(name){clearInterval(sessionsTimer);sessionsTimer=null;if(name==='sessions'){sessionsTimer=setInterval(()=>{if(!$('#sessions-view').hidden)switchPanel('sessions').catch(showError);},30000);}$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','chat','inbox','history','trash','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;if(name==='chat'){await renderChatHistory();}$('#list-panel').hidden=name!=='notes';if(name==='inbox'){await renderInbox();}if(name==='trash'){const notes=(await api('/api/trash')).notes;$('#trash-list').innerHTML=notes.map(n=>`<div class="note-card"><strong>${esc(n.title)}</strong><small class="muted">deleted ${esc(n.deleted_at||'')}</small><div><button data-restore="${esc(n.id)}" data-version="${n.version}">Restore</button> <button data-purge="${esc(n.id)}" data-version="${n.version}">Purge</button></div></div>`).join('')||'<p class="muted">Trash is empty.</p>';$$('#trash-list [data-restore]').forEach(b=>b.onclick=async()=>{await api('/api/notes/'+b.dataset.restore+'/restore',{method:'POST',body:JSON.stringify({version:Number(b.dataset.version)})});await loadNotes();await switchPanel('trash');});$$('#trash-list [data-purge]').forEach(b=>b.onclick=async()=>{if(!confirm('Permanently delete this note?'))return;await api('/api/notes/'+b.dataset.purge+'/purge',{method:'DELETE',body:JSON.stringify({version:Number(b.dataset.version)})});await switchPanel('trash');});}if(name==='sessions'){const sessions=(await api('/api/sessions')).sessions;$('#sessions-list').innerHTML=sessions.map(s=>`<div class="note-card"><strong>${esc(s.title||s.id)}</strong><small class="muted">${esc(s.source||'')} · ${esc(s.last_activity_at||s.started_at||'')}</small><div><button data-copy-command="${esc(s.resume_command||'')}">Copy resume command</button></div></div>`).join('')||'<p class="muted">No recent sessions.</p>';$$('#sessions-list [data-copy-command]').forEach(b=>b.onclick=async()=>{const command=b.dataset.copyCommand;try{await navigator.clipboard.writeText(command);$('#status').textContent='Copied: '+command;$('#status').className='status success';}catch(e){$('#status').textContent=command;$('#status').className='status';}});}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
 $('#note-tag-filter').onchange=()=>loadNotes().catch(showError);$('#note-sort').onchange=()=>loadNotes().catch(showError);$('#export-notes').onclick=async()=>{try{const data=await api('/api/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='hermes-workspace.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#status').textContent='Exported '+data.notes.length+' notes';$('#status').className='status success';}catch(e){showError(e);}};$('#import-notes').onchange=async e=>{const file=e.target.files&&e.target.files[0];if(!file)return;try{const text=await file.text();if(/\.(md|markdown|txt)$/i.test(file.name)){const title=file.name.replace(/\.[^.]+$/,'');const r=await api('/api/notes',{method:'POST',body:JSON.stringify({title,content:text})});selected=r.note.id;version=r.note.version;$('#note-title').value=r.note.title;$('#note-tags').value=r.note.tags.join(', ');$('#note-content').value=r.note.content;$('#note-preview').innerHTML=r.note.html;$('#status').textContent='Imported '+file.name;$('#status').className='status success';}else{const payload=JSON.parse(text);const result=await api('/api/import',{method:'POST',body:JSON.stringify({notes:payload.notes||payload})});$('#status').textContent='Imported '+result.imported+' notes';$('#status').className='status success';}await loadTags();await loadNotes();}catch(err){showError(err);}e.target.value='';};$('#save-note').onclick=()=>saveNote().catch(showError);$('#pin-note').onclick=()=>togglePin().catch(showError);$('#duplicate-note').onclick=()=>duplicateNote().catch(showError);$('#history-note').onclick=()=>showHistory().catch(showError);$('#manage-tags').onclick=()=>manageTags().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);$('#note-title').oninput=saveDraft;$('#note-tags').oninput=saveDraft;let previewTimer=null;$('#note-content').oninput=()=>{saveDraft();clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
-document.addEventListener('keydown',e=>{const mod=e.metaKey||e.ctrlKey;if(!mod)return;const key=e.key.toLowerCase();if(key==='s'){e.preventDefault();saveNote().catch(showError);}else if(key==='n'){e.preventDefault();newNote();}else if(key==='k'){e.preventDefault();$('#note-search').focus();}});
-async function renderInbox(){const items=(await api('/api/inbox')).items;$('#inbox-list').innerHTML=items.map(i=>`<div class="note-card"><strong>${esc(i.text)}</strong><small class="muted">${esc(i.status)} · ${esc(i.created_at)}</small><div>${i.status!=='done'?`<button data-inbox-done="${esc(i.id)}">Done</button>`:''} ${i.status!=='archived'?`<button data-inbox-archive="${esc(i.id)}">Archive</button>`:''}</div></div>`).join('')||'<p class="muted">Nothing captured yet.</p>';$$('#inbox-list [data-inbox-done]').forEach(b=>b.onclick=async()=>{await api('/api/inbox/'+b.dataset.inboxDone,{method:'PATCH',body:JSON.stringify({status:'done'})});await renderInbox();});$$('#inbox-list [data-inbox-archive]').forEach(b=>b.onclick=async()=>{await api('/api/inbox/'+b.dataset.inboxArchive,{method:'PATCH',body:JSON.stringify({status:'archived'})});await renderInbox();});}
+document.addEventListener('keydown',e=>{const mod=e.metaKey||e.ctrlKey;if(!mod)return;const key=e.key.toLowerCase();if(key==='s'){e.preventDefault();saveNote().catch(showError);}else if(key==='n'){e.preventDefault();newNote();}else if(key==='k'||key==='f'){e.preventDefault();$('#note-search').focus();}else if(key==='d'){e.preventDefault();duplicateNote().catch(showError);}else if(key==='p'){e.preventDefault();togglePin().catch(showError);}});
+async function renderInbox(){const items=(await api('/api/inbox')).items;$('#inbox-list').innerHTML=items.map(i=>`<div class="note-card"><strong>${esc(i.text)}</strong><small class="muted">${esc(i.status)} · ${esc(i.created_at)}</small><div>${i.status!=='done'?`<button data-inbox-done="${esc(i.id)}">Done</button>`:''} <button data-inbox-promote="${esc(i.id)}">To note</button> ${i.status!=='archived'?`<button data-inbox-archive="${esc(i.id)}">Archive</button>`:''}</div></div>`).join('')||'<p class="muted">Nothing captured yet.</p>';$$('#inbox-list [data-inbox-done]').forEach(b=>b.onclick=async()=>{await api('/api/inbox/'+b.dataset.inboxDone,{method:'PATCH',body:JSON.stringify({status:'done'})});await renderInbox();});$$('#inbox-list [data-inbox-promote]').forEach(b=>b.onclick=async()=>{const r=await api('/api/inbox/'+b.dataset.inboxPromote+'/promote',{method:'POST'});selected=r.note.id;version=r.note.version;$('#note-title').value=r.note.title;$('#note-tags').value=r.note.tags.join(', ');$('#note-content').value=r.note.content;$('#note-preview').innerHTML=r.note.html;await renderInbox();await loadNotes();$('#status').textContent='Promoted to a note';$('#status').className='status success';});$$('#inbox-list [data-inbox-archive]').forEach(b=>b.onclick=async()=>{await api('/api/inbox/'+b.dataset.inboxArchive,{method:'PATCH',body:JSON.stringify({status:'archived'})});await renderInbox();});}
 $('#add-inbox').onclick=async()=>{const text=$('#inbox-input').value.trim();if(!text)return;try{await api('/api/inbox',{method:'POST',body:JSON.stringify({text})});$('#inbox-input').value='';await renderInbox();}catch(e){showError(e);}};
 $('#inbox-input').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();$('#add-inbox').click();}};
 let pendingChatContext='';
@@ -961,6 +969,11 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/inbox":
                 self._json(201, {"item": self.store.create_inbox_item(data.get("text", ""))})
+                return
+            if path.startswith("/api/inbox/") and path.endswith("/promote"):
+                item_id = path.removeprefix("/api/inbox/").removesuffix("/promote")
+                note = self.store.promote_inbox_item(item_id, data.get("title", ""))
+                self._json(201, {"note": note})
                 return
             if path.startswith("/api/notes/") and "/versions/" in path and path.endswith("/restore"):
                 note_id, _, tail = path.removeprefix("/api/notes/").partition("/versions/")
@@ -1501,6 +1514,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--check", action="store_true", help="verify the workspace and exit")
     parser.add_argument("--export", default=None, help="write a JSON backup to PATH (or - for stdout)")
     parser.add_argument("--import", dest="import_file", default=None, help="import notes from a JSON backup")
+    parser.add_argument("--open", dest="open_note", default=None, help="open a note by id")
     return parser
 
 
@@ -1519,6 +1533,14 @@ def run(argv: list[str] | None = None) -> int:
         return 1
     actual_port = httpd.server_address[1]
     url = f"http://{args.host}:{actual_port}/?token={token}"
+    open_note = getattr(args, "open_note", None) or getattr(args, "open", None)
+    if open_note:
+        if not NOTE_ID_RE.fullmatch(str(open_note)):
+            print(f"Invalid note id: {open_note}", file=sys.stderr)
+            httpd.server_close()
+            store.close()
+            return 2
+        url += f"#note={open_note}"
     print(f"Hermes Workspace: {url}")
     print(f"Data: {store.root}")
     if not args.no_browser:
@@ -1631,6 +1653,9 @@ def cmd_workspace(args) -> int:
         value = getattr(args, name, None)
         if value:
             argv += [f"--{name}", str(value)]
+    open_note = getattr(args, "open_note", None) or getattr(args, "open", None)
+    if open_note:
+        argv += ["--open", str(open_note)]
     if getattr(args, "no_browser", False):
         argv.append("--no-browser")
     return run(argv)

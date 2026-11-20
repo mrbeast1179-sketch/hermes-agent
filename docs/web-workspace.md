@@ -56,6 +56,10 @@ local-first editor that starts in under a second and needs no gateway.
 | `POST` | `/api/tags/rename` | Rename a tag across every live note (`old`, `new`) |
 | `DELETE` | `/api/tags/{tag}` | Remove a tag from every live note |
 | `POST` | `/api/markdown/preview` | Render HTML without saving |
+| `GET` | `/api/inbox` | List inbox items (`?status=open` filters) |
+| `POST` | `/api/inbox` | Capture an inbox item |
+| `PATCH` | `/api/inbox/{id}` | Change an inbox item's status |
+| `POST` | `/api/inbox/{id}/promote` | Turn an inbox item into a note (optional `title`) |
 
 Updates use optimistic concurrency: a stale `version` returns HTTP 409 so a
 second tab cannot silently overwrite the first tab's edits.
@@ -84,6 +88,15 @@ text file. A `.md`, `.markdown`, or `.txt` file becomes a new note titled
 after the file name, with the file contents as the note body, and opens in
 the editor.
 
+## Opening a note from the CLI
+
+```bash
+hermes workspace --open <note-id>
+```
+
+starts the workspace and opens straight to that note (the URL carries the
+note id). An id that is not a note id is rejected before the server starts.
+
 ## Linking and session shortcuts
 
 Selecting a note puts it in the URL (`#note=<id>`), so a note can be
@@ -108,6 +121,9 @@ never rewritten and the restore itself can be undone.
 | `⌘S` / `Ctrl+S` | Save the current note |
 | `⌘N` / `Ctrl+N` | Start a new note |
 | `⌘K` / `Ctrl+K` | Focus the search box |
+| `⌘F` / `Ctrl+F` | Focus the search box |
+| `⌘D` / `Ctrl+D` | Duplicate the current note |
+| `⌘P` / `Ctrl+P` | Pin or unpin the current note |
 
 ## Headless backup and restore
 
@@ -136,9 +152,10 @@ a check fails, so it is usable as a smoke test in scripts.
 ## Inbox
 
 The Inbox panel captures thoughts with an input and Add button (Enter also
-works). Each item can be marked Done or Archived; the list is stored in the
-workspace database and included in export. `GET /api/inbox?status=open`
-filters by status.
+works). Each item can be marked Done or Archived, or promoted to a note with
+"To note" (the note is titled after the item's first line and the item is
+then marked Done). The list is stored in the workspace database and included
+in export. `GET /api/inbox?status=open` filters by status.
 
 ## Finding and moving notes
 
