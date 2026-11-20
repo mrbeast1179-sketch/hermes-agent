@@ -50,6 +50,9 @@ local-first editor that starts in under a second and needs no gateway.
 | `POST` | `/api/notes/{id}/restore` | Restore a trashed note |
 | `DELETE` | `/api/notes/{id}/purge` | Permanently delete a trashed note |
 | `POST` | `/api/notes/{id}/pin` | Pin (`pinned: true`) or unpin a note |
+| `POST` | `/api/notes/{id}/duplicate` | Copy a note (content and tags) into a new note |
+| `POST` | `/api/tags/rename` | Rename a tag across every live note (`old`, `new`) |
+| `DELETE` | `/api/tags/{tag}` | Remove a tag from every live note |
 | `POST` | `/api/markdown/preview` | Render HTML without saving |
 
 Updates use optimistic concurrency: a stale `version` returns HTTP 409 so a
@@ -58,6 +61,16 @@ second tab cannot silently overwrite the first tab's edits.
 Pinned notes always lead the list, keep their relative order, and survive
 restarts. The editor shows a Pin/Unpin button, and the list marks pinned
 notes with a pin.
+
+## Duplicating and organising notes
+
+Duplicate copies the selected note's content and tags into a new note
+titled "<title> (copy)" and opens it in the editor.
+
+The Tags button next to the filter renames or removes the selected tag
+across every live note. Renaming keeps a note's other tags and never
+duplicates a tag; removing strips the tag everywhere. Both report how many
+notes changed.
 
 ## Keyboard shortcuts
 

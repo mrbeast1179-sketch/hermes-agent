@@ -459,6 +459,47 @@ def test_chat_stream_reports_provider_errors(server, monkeypatch):
     assert [m["role"] for m in history["messages"]] == ["user"]
 
 
+def test_duplicate_note_copies_content_and_tags(server):
+    base, _ = server
+    _, created, _ = request(base, "/api/notes", method="POST", payload={
+        "title": "Original", "content": "# body", "tags": ["keep", "copy"],
+    })
+    note_id = created["note"]["id"]
+    status, copy, _ = request(base, f"/api/notes/{note_id}/duplicate", method="POST")
+    assert status == 201
+    assert copy["note"]["id"] != note_id
+    assert copy["note"]["title"] == "Original (copy)"
+    assert copy["note"]["content"] == "# body"
+    assert copy["note"]["tags"] == ["keep", "copy"]
+
+    _, listed, _ = request(base, "/api/notes")
+    assert len(listed["notes"]) == 2
+    assert request(base, "/api/notes/not-a-note/duplicate", method="POST")[0] == 404
+
+
+def test_rename_and_remove_tag_across_notes(server):
+    base, _ = server
+    request(base, "/api/notes", method="POST", payload={"title": "One", "tags": ["old", "other"]})
+    request(base, "/api/notes", method="POST", payload={"title": "Two", "tags": ["old"]})
+
+    status, renamed, _ = request(base, "/api/tags/rename", method="POST", payload={"old": "old", "new": "new"})
+    assert status == 200
+    assert renamed["changed"] == 2
+    _, tags, _ = request(base, "/api/tags")
+    names = {tag["tag"] for tag in tags["tags"]}
+    assert "old" not in names
+    assert "new" in names
+
+    status, removed, _ = request(base, "/api/tags/new", method="DELETE")
+    assert status == 200
+    assert removed["changed"] == 2
+    _, tags, _ = request(base, "/api/tags")
+    assert "new" not in {tag["tag"] for tag in tags["tags"]}
+
+    assert request(base, "/api/tags/rename", method="POST", payload={"old": "", "new": "x"})[0] == 400
+    assert request(base, "/api/tags/rename", method="POST", payload={"old": "x", "new": ""})[0] == 400
+
+
 def test_inbox_add_and_status_actions(server):
     base, _ = server
     status, created, _ = request(base, "/api/inbox", method="POST", payload={"text": "Capture this"})
