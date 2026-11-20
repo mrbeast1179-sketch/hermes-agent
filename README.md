@@ -113,6 +113,7 @@ hermes tools        # Configure which tools are enabled
 hermes config set   # Set individual config values
 hermes config get   # Print individual config values
 hermes gateway      # Start the messaging gateway (Telegram, Discord, etc.)
+hermes workspace    # Local-first browser workspace (notes, inbox, sessions)
 hermes setup        # Run the full setup wizard (configures everything at once)
 hermes claw migrate # Migrate from OpenClaw (if coming from OpenClaw)
 hermes update       # Update to the latest version
