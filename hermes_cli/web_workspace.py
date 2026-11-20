@@ -105,7 +105,8 @@ class WorkspaceStore:
                     tags TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1
+                    version INTEGER NOT NULL DEFAULT 1,
+                    deleted_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS notes_updated_idx ON notes(updated_at DESC);
                 CREATE TABLE IF NOT EXISTS inbox (
@@ -118,6 +119,10 @@ class WorkspaceStore:
                 CREATE INDEX IF NOT EXISTS inbox_created_idx ON inbox(created_at DESC);
                 """
             )
+            # Migrate databases created before soft delete existed.
+            columns = {row["name"] for row in self._db.execute("PRAGMA table_info(notes)")}
+            if "deleted_at" not in columns:
+                self._db.execute("ALTER TABLE notes ADD COLUMN deleted_at TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -132,6 +137,7 @@ class WorkspaceStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "version": row["version"],
+            "deleted_at": row["deleted_at"] if "deleted_at" in row.keys() else None,
         }
         if include_content:
             note["content"] = row["content"]
@@ -156,22 +162,34 @@ class WorkspaceStore:
             )
         return self.get_note(note_id)
 
-    def get_note(self, note_id: str) -> dict[str, Any]:
+    def get_note(self, note_id: str, *, include_deleted: bool = True) -> dict[str, Any]:
         if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
             raise KeyError(note_id)
         row = self._db.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
         if row is None:
             raise KeyError(note_id)
+        if not include_deleted and row["deleted_at"]:
+            raise KeyError(note_id)
         return self._note(row)
 
     def list_notes(
-        self, query: str = "", tag: str = "", *, include_content: bool = False
+        self,
+        query: str = "",
+        tag: str = "",
+        *,
+        include_content: bool = False,
+        include_deleted: bool = False,
     ) -> list[dict[str, Any]]:
         query = str(query or "").strip()
         tag = str(tag or "").strip().lower()
-        rows = self._db.execute(
-            "SELECT * FROM notes ORDER BY updated_at DESC, id ASC"
-        ).fetchall()
+        if include_deleted:
+            rows = self._db.execute(
+                "SELECT * FROM notes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id ASC"
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT * FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC, id ASC"
+            ).fetchall()
         result: list[dict[str, Any]] = []
         needle = query.casefold()
         for row in rows:
@@ -203,8 +221,12 @@ class WorkspaceStore:
             raise ValueError("version must be an integer")
         timestamp = _now()
         with self._lock, self._db:
-            row = self._db.execute("SELECT version FROM notes WHERE id=?", (note_id,)).fetchone()
+            row = self._db.execute(
+                "SELECT version, deleted_at FROM notes WHERE id=?", (note_id,)
+            ).fetchone()
             if row is None or not NOTE_ID_RE.fullmatch(str(note_id)):
+                raise KeyError(note_id)
+            if row["deleted_at"]:
                 raise KeyError(note_id)
             if row["version"] != version:
                 raise RuntimeError("version conflict")
@@ -214,11 +236,54 @@ class WorkspaceStore:
             )
         return self.get_note(note_id)
 
-    def delete_note(self, note_id: str, version: int) -> bool:
+    def delete_note(self, note_id: str, version: int) -> dict[str, Any]:
+        """Move a note to trash. The row survives until it is purged."""
         if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
             raise KeyError(note_id)
         with self._lock, self._db:
-            row = self._db.execute("SELECT version FROM notes WHERE id=?", (note_id,)).fetchone()
+            row = self._db.execute(
+                "SELECT version, deleted_at FROM notes WHERE id=?", (note_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(note_id)
+            if row["version"] != version:
+                raise RuntimeError("version conflict")
+            if row["deleted_at"]:
+                return self.get_note(note_id)
+            self._db.execute(
+                "UPDATE notes SET deleted_at=?, updated_at=?, version=version+1 WHERE id=?",
+                (_now(), _now(), note_id),
+            )
+        return self.get_note(note_id)
+
+    def restore_note(self, note_id: str, version: int) -> dict[str, Any]:
+        """Bring a trashed note back with its content intact."""
+        if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
+            raise KeyError(note_id)
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT version, deleted_at FROM notes WHERE id=?", (note_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(note_id)
+            if row["version"] != version:
+                raise RuntimeError("version conflict")
+            if not row["deleted_at"]:
+                return self.get_note(note_id)
+            self._db.execute(
+                "UPDATE notes SET deleted_at=NULL, updated_at=?, version=version+1 WHERE id=?",
+                (_now(), note_id),
+            )
+        return self.get_note(note_id)
+
+    def purge_note(self, note_id: str, version: int) -> bool:
+        """Permanently remove a trashed note."""
+        if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
+            raise KeyError(note_id)
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT version, deleted_at FROM notes WHERE id=?", (note_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(note_id)
             if row["version"] != version:
@@ -390,11 +455,12 @@ _HTML_PAGE = r"""<!doctype html>
 </head>
 <body>
 <div class="shell">
-<nav class="rail"><h1 class="brand">Hermes</h1><button class="active" data-panel="notes">Notes</button><button data-panel="inbox">Inbox</button><button data-panel="sessions">Sessions</button><button data-panel="terminal">Terminal</button><button data-panel="system">System</button><div class="status" id="status">Connecting…</div></nav>
+<nav class="rail"><h1 class="brand">Hermes</h1><button class="active" data-panel="notes">Notes</button><button data-panel="inbox">Inbox</button><button data-panel="trash">Trash</button><button data-panel="sessions">Sessions</button><button data-panel="terminal">Terminal</button><button data-panel="system">System</button><div class="status" id="status">Connecting…</div></nav>
 <section class="list" id="list-panel"><div class="list-head"><input id="note-search" placeholder="Search notes"></div><div id="note-list"></div></section>
 <section class="editor" id="editor-panel">
 <div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button></div><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
 <div id="inbox-view" hidden><h1>Inbox</h1><div id="inbox-list"></div></div>
+<div id="trash-view" hidden><h1>Trash</h1><p class="muted">Deleted notes stay here until you purge them.</p><div id="trash-list"></div></div>
 <div id="sessions-view" hidden><h1>Recent sessions</h1><div id="sessions-list"></div></div>
 <div id="terminal-view" hidden><h1>Read-only terminal</h1><div class="toolbar"><input id="term-input" value="pwd"><button id="run-term">Run</button></div><pre id="term-output" class="term"></pre></div>
 <div id="system-view" hidden><h1>System</h1><pre id="system-output" class="term"></pre></div>
@@ -408,13 +474,17 @@ let notes=[],selected=null,version=1;
 async function api(path,options={}){options.headers={...(options.headers||{}),'Authorization':'Bearer '+token};if(options.method&&options.method!=='GET'){options.headers['Origin']=location.origin;options.headers['X-Workspace-CSRF']=token;options.headers['Content-Type']='application/json';}const r=await fetch(path,options);const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.error||('HTTP '+r.status));return data;}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function showError(e){$('#status').textContent=e.message||String(e);$('#status').className='status error';}
+function draftKey(){return 'workspace-draft-'+(selected||'new');}
+function saveDraft(){try{localStorage.setItem(draftKey(),JSON.stringify({title:$('#note-title').value,tags:$('#note-tags').value,content:$('#note-content').value,at:Date.now()}));}catch(e){}}
+function clearDraft(){try{localStorage.removeItem(draftKey());}catch(e){}}
+function restoreDraft(){try{const raw=localStorage.getItem(draftKey());if(!raw)return false;const d=JSON.parse(raw);if(!d||(!d.title&&!d.content))return false;$('#note-title').value=d.title||'';$('#note-tags').value=d.tags||'';$('#note-content').value=d.content||'';return true;}catch(e){return false;}}
 async function loadNotes(){notes=(await api('/api/notes?q='+encodeURIComponent($('#note-search').value))).notes;$('#note-list').innerHTML=notes.map(n=>`<div class="note-card ${selected===n.id?'active':''}" data-id="${esc(n.id)}"><strong>${esc(n.title)}</strong><small>${esc(n.tags.join(', '))} · v${n.version}</small></div>`).join('')||'<p class="muted">No notes yet.</p>';$$('.note-card').forEach(el=>el.onclick=()=>selectNote(el.dataset.id));}
-async function selectNote(id){selected=id;const {note}=await api('/api/notes/'+id);version=note.version;$('#note-title').value=note.title;$('#note-tags').value=note.tags.join(', ');$('#note-content').value=note.content;$('#note-preview').innerHTML=note.html;await loadNotes();}
-async function saveNote(){if(!$('#note-title').value.trim())return showError(new Error('Title is required'));const body={title:$('#note-title').value,content:$('#note-content').value,tags:$('#note-tags').value.split(',').map(x=>x.trim()).filter(Boolean),version};if(selected){const {note}=await api('/api/notes/'+selected,{method:'PUT',body:JSON.stringify(body)});version=note.version;$('#note-preview').innerHTML=note.html;}else{const {note}=await api('/api/notes',{method:'POST',body:JSON.stringify(body)});selected=note.id;version=note.version;$('#note-preview').innerHTML=note.html;}await loadNotes();$('#status').textContent='Saved';$('#status').className='status success';}
-async function newNote(){selected=null;version=1;$('#note-title').value='';$('#note-tags').value='';$('#note-content').value='';$('#note-preview').innerHTML='';}
-async function deleteNote(){if(!selected||!confirm('Delete this note?'))return;try{await api('/api/notes/'+selected,{method:'DELETE',body:JSON.stringify({version})});await newNote();await loadNotes();}catch(e){showError(e);}}
-async function switchPanel(name){$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','inbox','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;$('#list-panel').hidden=name!=='notes';if(name==='inbox'){$('#inbox-list').innerHTML=(await api('/api/inbox')).items.map(i=>`<p>${esc(i.text)} <small class="muted">${esc(i.status)}</small></p>`).join('');}if(name==='sessions'){$('#sessions-list').innerHTML=(await api('/api/sessions')).sessions.map(s=>`<p>${esc(s.title||s.id)} <small class="muted">${esc(s.source||'')}</small></p>`).join('');}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
-$('#save-note').onclick=()=>saveNote().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);let previewTimer=null;$('#note-content').oninput=()=>{clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
+async function selectNote(id){selected=id;const {note}=await api('/api/notes/'+id);version=note.version;$('#note-title').value=note.title;$('#note-tags').value=note.tags.join(', ');$('#note-content').value=note.content;$('#note-preview').innerHTML=note.html;if(restoreDraft()){$('#status').textContent='Unsaved draft restored';$('#status').className='status success';}await loadNotes();}
+async function saveNote(){if(!$('#note-title').value.trim())return showError(new Error('Title is required'));const wasNew=!selected;const body={title:$('#note-title').value,content:$('#note-content').value,tags:$('#note-tags').value.split(',').map(x=>x.trim()).filter(Boolean),version};if(selected){const {note}=await api('/api/notes/'+selected,{method:'PUT',body:JSON.stringify(body)});version=note.version;$('#note-preview').innerHTML=note.html;}else{const {note}=await api('/api/notes',{method:'POST',body:JSON.stringify(body)});selected=note.id;version=note.version;$('#note-preview').innerHTML=note.html;}clearDraft();if(wasNew){try{localStorage.removeItem('workspace-draft-new');}catch(e){}}await loadNotes();$('#status').textContent='Saved';$('#status').className='status success';}
+async function newNote(){selected=null;version=1;$('#note-title').value='';$('#note-tags').value='';$('#note-content').value='';$('#note-preview').innerHTML='';clearDraft();}
+async function deleteNote(){if(!selected||!confirm('Move this note to trash?'))return;try{await api('/api/notes/'+selected,{method:'DELETE',body:JSON.stringify({version})});await newNote();await loadNotes();$('#status').textContent='Moved to trash';$('#status').className='status success';}catch(e){showError(e);}}
+async function switchPanel(name){$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','inbox','trash','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;$('#list-panel').hidden=name!=='notes';if(name==='inbox'){$('#inbox-list').innerHTML=(await api('/api/inbox')).items.map(i=>`<p>${esc(i.text)} <small class="muted">${esc(i.status)}</small></p>`).join('');}if(name==='trash'){const notes=(await api('/api/trash')).notes;$('#trash-list').innerHTML=notes.map(n=>`<div class="note-card"><strong>${esc(n.title)}</strong><small class="muted">deleted ${esc(n.deleted_at||'')}</small><div><button data-restore="${esc(n.id)}" data-version="${n.version}">Restore</button> <button data-purge="${esc(n.id)}" data-version="${n.version}">Purge</button></div></div>`).join('')||'<p class="muted">Trash is empty.</p>';$$('#trash-list [data-restore]').forEach(b=>b.onclick=async()=>{await api('/api/notes/'+b.dataset.restore+'/restore',{method:'POST',body:JSON.stringify({version:Number(b.dataset.version)})});await loadNotes();await switchPanel('trash');});$$('#trash-list [data-purge]').forEach(b=>b.onclick=async()=>{if(!confirm('Permanently delete this note?'))return;await api('/api/notes/'+b.dataset.purge+'/purge',{method:'DELETE',body:JSON.stringify({version:Number(b.dataset.version)})});await switchPanel('trash');});}if(name==='sessions'){$('#sessions-list').innerHTML=(await api('/api/sessions')).sessions.map(s=>`<p>${esc(s.title||s.id)} <small class="muted">${esc(s.source||'')}</small></p>`).join('');}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
+$('#save-note').onclick=()=>saveNote().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);$('#note-title').oninput=saveDraft;$('#note-tags').oninput=saveDraft;let previewTimer=null;$('#note-content').oninput=()=>{saveDraft();clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
 $('#run-term').onclick=()=>api('/api/terminal',{method:'POST',body:JSON.stringify({input:$('#term-input').value})}).then(r=>$('#term-output').textContent=r.output).catch(showError);
 $('#chat-form').onsubmit=async e=>{e.preventDefault();const input=$('#chat-input');const text=input.value;if(!text.trim())return;$('#chat-log').insertAdjacentHTML('beforeend','<p><b>You:</b> '+esc(text)+'</p>');input.value='';try{const r=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text})});$('#chat-log').insertAdjacentHTML('beforeend','<p><b>Hermes:</b> '+esc(r.reply)+'</p>');}catch(e){$('#chat-log').insertAdjacentHTML('beforeend','<p class="error">'+esc(e.message)+'</p>');}};
 (async()=>{try{$('#status').textContent='Ready';await loadNotes();}catch(e){showError(e);}})();
@@ -559,6 +629,12 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 except KeyError:
                     self._error(404, "note not found")
                 return
+            if path == "/api/trash":
+                self._json(
+                    200,
+                    {"notes": self.store.list_notes(include_deleted=True, include_content=True)},
+                )
+                return
             if path == "/api/inbox":
                 self._json(200, {"items": self.store.list_inbox()})
                 return
@@ -591,6 +667,11 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
             if path == "/api/inbox":
                 self._json(201, {"item": self.store.create_inbox_item(data.get("text", ""))})
                 return
+            if path.startswith("/api/notes/") and path.endswith("/restore"):
+                note_id = path.removeprefix("/api/notes/").removesuffix("/restore")
+                note = self.store.restore_note(note_id, data.get("version", 1))
+                self._json(200, {"note": note})
+                return
             if path == "/api/markdown/preview":
                 content = _clean_text(data.get("content", ""), "content", MAX_CONTENT, required=False)
                 self._json(200, {"html": render_markdown(content)})
@@ -602,6 +683,8 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 self._json(200, _chat_reply(data.get("message", "")))
                 return
             self._error(404, "not found")
+        except RuntimeError:
+            self._error(409, "note changed in another tab; reload before saving")
         except ValueError as exc:
             self._error(400, str(exc))
         except Exception as exc:
@@ -642,10 +725,15 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
             return
         try:
             if path.startswith("/api/notes/"):
-                note_id = path.removeprefix("/api/notes/")
                 data = self._read_json()
-                self.store.delete_note(note_id, data.get("version", 1))
-                self._json(200, {"deleted": True})
+                if path.endswith("/purge"):
+                    note_id = path.removeprefix("/api/notes/").removesuffix("/purge")
+                    self.store.purge_note(note_id, data.get("version", 1))
+                    self._json(200, {"purged": True})
+                    return
+                note_id = path.removeprefix("/api/notes/")
+                note = self.store.delete_note(note_id, data.get("version", 1))
+                self._json(200, {"deleted": True, "note": note})
                 return
             self._error(404, "not found")
         except KeyError:

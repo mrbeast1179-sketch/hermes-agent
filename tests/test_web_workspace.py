@@ -127,6 +127,61 @@ def test_csrf_allows_valid_mutation_and_security_headers(server):
         assert "test-token-1234567890" not in html
 
 
+def test_delete_moves_note_to_trash_and_restore_brings_it_back(server):
+    base, _ = server
+    _, created, _ = request(base, "/api/notes", method="POST", payload={"title": "Keep me", "content": "body"})
+    note_id = created["note"]["id"]
+
+    status, deleted, _ = request(base, f"/api/notes/{note_id}", method="DELETE", payload={"version": 1})
+    assert status == 200
+    assert deleted["deleted"] is True
+    assert deleted["note"]["deleted_at"]
+    assert deleted["note"]["version"] == 2
+
+    # Hidden from the normal list, visible in trash.
+    _, listed, _ = request(base, "/api/notes")
+    assert note_id not in [n["id"] for n in listed["notes"]]
+    _, trash, _ = request(base, "/api/trash")
+    assert [n["id"] for n in trash["notes"]] == [note_id]
+    assert trash["notes"][0]["content"] == "body"
+
+    # A trashed note cannot be edited until it is restored.
+    assert request(base, f"/api/notes/{note_id}", method="PUT", payload={
+        "title": "nope", "content": "x", "version": 2,
+    })[0] == 404
+
+    status, restored, _ = request(base, f"/api/notes/{note_id}/restore", method="POST", payload={"version": 2})
+    assert status == 200
+    assert restored["note"]["deleted_at"] is None
+    assert restored["note"]["content"] == "body"
+    _, listed, _ = request(base, "/api/notes")
+    assert note_id in [n["id"] for n in listed["notes"]]
+
+
+def test_purge_removes_note_permanently(server):
+    base, _ = server
+    _, created, _ = request(base, "/api/notes", method="POST", payload={"title": "Temporary", "content": "x"})
+    note_id = created["note"]["id"]
+    _, deleted, _ = request(base, f"/api/notes/{note_id}", method="DELETE", payload={"version": 1})
+    trashed_version = deleted["note"]["version"]
+    status, purged, _ = request(base, f"/api/notes/{note_id}/purge", method="DELETE", payload={"version": trashed_version})
+    assert status == 200
+    assert purged["purged"] is True
+    assert request(base, f"/api/notes/{note_id}")[0] == 404
+    _, trash, _ = request(base, "/api/trash")
+    assert trash["notes"] == []
+
+
+def test_trash_restore_rejects_stale_versions(server):
+    base, _ = server
+    _, created, _ = request(base, "/api/notes", method="POST", payload={"title": "Versioned", "content": "x"})
+    note_id = created["note"]["id"]
+    _, deleted, _ = request(base, f"/api/notes/{note_id}", method="DELETE", payload={"version": 1})
+    assert deleted["note"]["version"] == 2
+    assert request(base, f"/api/notes/{note_id}/restore", method="POST", payload={"version": 1})[0] == 409
+    assert request(base, f"/api/notes/{note_id}/restore", method="POST", payload={"version": 2})[0] == 200
+
+
 def test_browser_reload_keeps_authentication_with_strict_cookie(server):
     base, _ = server
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
