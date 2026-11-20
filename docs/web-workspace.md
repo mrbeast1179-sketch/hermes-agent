@@ -42,11 +42,26 @@ local-first editor that starts in under a second and needs no gateway.
 | `GET` | `/api/notes/{id}` | Read one note with rendered HTML |
 | `POST` | `/api/notes` | Create a note |
 | `PUT` | `/api/notes/{id}` | Update a note (optimistic `version` required) |
-| `DELETE` | `/api/notes/{id}` | Delete a note (optimistic `version` required) |
+| `DELETE` | `/api/notes/{id}` | Move a note to trash (optimistic `version` required) |
+| `GET` | `/api/trash` | List trashed notes |
+| `POST` | `/api/notes/{id}/restore` | Restore a trashed note |
+| `DELETE` | `/api/notes/{id}/purge` | Permanently delete a trashed note |
 | `POST` | `/api/markdown/preview` | Render HTML without saving |
 
 Updates use optimistic concurrency: a stale `version` returns HTTP 409 so a
 second tab cannot silently overwrite the first tab's edits.
+
+## Deletion and drafts
+
+Deleting a note moves it to trash instead of destroying it. Trashed notes
+keep their content and tags, disappear from the normal list, and cannot be
+edited until they are restored. The Trash panel restores a note with one
+click or purges it permanently.
+
+The editor also autosaves an unsaved draft to `localStorage` for the note
+you are editing. If you close the tab or reload before saving, the draft is
+restored and the status bar says "Unsaved draft restored"; saving clears
+the draft.
 
 ## Tests
 
