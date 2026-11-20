@@ -459,6 +459,24 @@ def test_chat_stream_reports_provider_errors(server, monkeypatch):
     assert [m["role"] for m in history["messages"]] == ["user"]
 
 
+def test_system_info_reports_workspace_root(server):
+    base, _ = server
+    status, payload, _ = request(base, "/api/system")
+    assert status == 200
+    system = payload["system"]
+    assert system["workspace_root"].endswith("workspace")
+    assert "hermes_home" in system
+    assert "time_utc" in system
+
+
+def test_sessions_endpoint_is_safe_without_state_db(server, monkeypatch):
+    base, _ = server
+    monkeypatch.setenv("HERMES_HOME", "/nonexistent-hermes-home-for-workspace-test")
+    status, payload, _ = request(base, "/api/sessions")
+    assert status == 200
+    assert payload["sessions"] == []
+
+
 def test_note_version_history_records_and_restores(server):
     base, _ = server
     _, created, _ = request(base, "/api/notes", method="POST", payload={

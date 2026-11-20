@@ -74,6 +74,15 @@ across every live note. Renaming keeps a note's other tags and never
 duplicates a tag; removing strips the tag everywhere. Both report how many
 notes changed.
 
+## Linking and session shortcuts
+
+Selecting a note puts it in the URL (`#note=<id>`), so a note can be
+bookmarked or shared and reopening the link restores that note.
+
+The Sessions panel lists recent Hermes sessions with a copyable resume
+command (`hermes --resume <id>`). The System panel reports the workspace
+data directory alongside the platform and Hermes home.
+
 ## Version history
 
 Every saved version of a note is stored, so an edit can be rolled back.
