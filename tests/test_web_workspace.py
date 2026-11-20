@@ -370,6 +370,95 @@ def test_workspace_self_check_flags_unusable_root(tmp_path: Path):
     assert result["checks"][0]["name"] == "database"
 
 
+def test_chat_stream_emits_deltas_and_persists_reply(server, monkeypatch):
+    base, _ = server
+    from types import ModuleType, SimpleNamespace
+
+    module = ModuleType("agent.auxiliary_client")
+
+    def fake_call_llm(**kwargs):
+        assert kwargs.get("stream") is True
+        def chunks():
+            for word in ["Streamed ", "reply ", "here"]:
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content=word))]
+                )
+        return chunks()
+
+    module.call_llm = fake_call_llm
+    package = ModuleType("agent")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "hermes")
+
+    req = urllib.request.Request(
+        base + "/api/chat/stream",
+        data=json.dumps({"message": "stream please"}).encode(),
+        headers={
+            "Authorization": "Bearer test-token-1234567890",
+            "Origin": base,
+            "X-Workspace-CSRF": "test-token-1234567890",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        assert response.headers["Content-Type"].startswith("text/event-stream")
+        body = response.read().decode()
+    events = [
+        json.loads(line[len("data: "):])
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert [event["delta"] for event in events if "delta" in event] == [
+        "Streamed ",
+        "reply ",
+        "here",
+    ]
+    assert events[-1]["done"] is True
+    assert events[-1]["reply"] == "Streamed reply here"
+
+    _, history, _ = request(base, "/api/chat")
+    assert [m["role"] for m in history["messages"]] == ["user", "assistant"]
+    assert history["messages"][-1]["content"] == "Streamed reply here"
+
+
+def test_chat_stream_reports_provider_errors(server, monkeypatch):
+    base, _ = server
+    from types import ModuleType
+
+    module = ModuleType("agent.auxiliary_client")
+
+    def fake_call_llm(**kwargs):
+        raise RuntimeError("provider exploded")
+
+    module.call_llm = fake_call_llm
+    package = ModuleType("agent")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "hermes")
+
+    req = urllib.request.Request(
+        base + "/api/chat/stream",
+        data=json.dumps({"message": "stream please"}).encode(),
+        headers={
+            "Authorization": "Bearer test-token-1234567890",
+            "Origin": base,
+            "X-Workspace-CSRF": "test-token-1234567890",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        body = response.read().decode()
+    assert "provider exploded" in body
+    # A failed turn must not be stored as an assistant reply.
+    _, history, _ = request(base, "/api/chat")
+    assert [m["role"] for m in history["messages"]] == ["user"]
+
+
 def test_inbox_add_and_status_actions(server):
     base, _ = server
     status, created, _ = request(base, "/api/inbox", method="POST", payload={"text": "Capture this"})

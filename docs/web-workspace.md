@@ -118,9 +118,15 @@ workspace never reads or stores an API key.
 `hermes chat` for this would start a second installation, which Hermes'
 shared-profile guard refuses; the in-process router avoids that entirely.
 
-While a reply is in flight the Send button is disabled and a "Hermes is
-thinking" indicator shows elapsed seconds; on failure the draft text is
-restored instead of being lost.
+Replies stream: the panel renders text as it arrives instead of waiting for
+the full answer. While a reply is in flight the Send button is disabled and
+a "Hermes is thinking" indicator shows elapsed seconds; on failure the
+draft text is restored instead of being lost. The streamed reply is stored
+in the conversation exactly like a non-streamed one.
+
+The stream endpoint emits `{"delta": "..."}` events and a final
+`{"done": true, "reply": "..."}` event; a provider failure is reported as
+an `{"error": "..."}` event and is never stored as an assistant reply.
 
 The conversation is persisted in the same SQLite database, so it survives
 restarts and reloads, and it is included in the workspace export. Each turn
@@ -132,6 +138,7 @@ conversation.
 | --- | --- | --- |
 | `GET` | `/api/chat` | Read the stored conversation |
 | `POST` | `/api/chat` | Send a message (`message`, optional `context`) |
+| `POST` | `/api/chat/stream` | Same, streamed as Server-Sent Events (`delta` events, then `done`) |
 | `DELETE` | `/api/chat` | Clear the conversation |
 
 Optional environment overrides:

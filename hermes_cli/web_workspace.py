@@ -27,7 +27,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import parse_qs, urlparse
 
 __all__ = [
@@ -615,7 +615,8 @@ $('#clear-chat').onclick=async()=>{await api('/api/chat',{method:'DELETE'});awai
 $('#run-term').onclick=()=>api('/api/terminal',{method:'POST',body:JSON.stringify({input:$('#term-input').value})}).then(r=>$('#term-output').textContent=r.output).catch(showError);
 let chatBusy=false,chatTimer=null;
 function setChatBusy(busy){chatBusy=busy;$('#chat-send').disabled=busy;$('#chat-thinking').hidden=!busy;$('#chat-input').readOnly=busy;if(busy){const started=Date.now();$('#chat-elapsed').textContent='0s';chatTimer=setInterval(()=>{$('#chat-elapsed').textContent=Math.floor((Date.now()-started)/1000)+'s';},1000);}else{clearInterval(chatTimer);chatTimer=null;}}
-$('#chat-form').onsubmit=async e=>{e.preventDefault();if(chatBusy)return;const input=$('#chat-input');const text=input.value;if(!text.trim())return;$('#chat-log').insertAdjacentHTML('beforeend','<p><b>You:</b> '+esc(text)+'</p>');input.value='';const context=pendingChatContext;pendingChatContext='';$('#chat-context').textContent='';setChatBusy(true);try{const r=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,context})});await renderChatHistory();}catch(e){$('#chat-log').insertAdjacentHTML('beforeend','<p class="error">'+esc(e.message)+'</p>');input.value=text;}finally{setChatBusy(false);}};
+async function streamChat(text,context){const response=await fetch('/api/chat/stream',{method:'POST',headers:{'Authorization':'Bearer '+token,'Origin':location.origin,'X-Workspace-CSRF':token,'Content-Type':'application/json'},body:JSON.stringify({message:text,context})});if(!response.ok||!response.body){const data=await response.json().catch(()=>({}));throw new Error(data.error||('HTTP '+response.status));}const reader=response.body.getReader();const decoder=new TextDecoder();const live=document.createElement('p');live.innerHTML='<b>Hermes:</b> ';$('#chat-log').appendChild(live);let buffer='';let full='';for(;;){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let index;while((index=buffer.indexOf('\n\n'))>=0){const raw=buffer.slice(0,index);buffer=buffer.slice(index+2);const line=raw.split('\n').find(l=>l.startsWith('data:'));if(!line)continue;const event=JSON.parse(line.slice(5).trim());if(event.error)throw new Error(event.error);if(event.delta){full+=event.delta;live.textContent='Hermes: '+full;$('#chat-log').scrollTop=$('#chat-log').scrollHeight;}}}return full;}
+$('#chat-form').onsubmit=async e=>{e.preventDefault();if(chatBusy)return;const input=$('#chat-input');const text=input.value;if(!text.trim())return;$('#chat-log').insertAdjacentHTML('beforeend','<p><b>You:</b> '+esc(text)+'</p>');input.value='';const context=pendingChatContext;pendingChatContext='';$('#chat-context').textContent='';setChatBusy(true);try{await streamChat(text,context);await renderChatHistory();}catch(err){$('#chat-log').insertAdjacentHTML('beforeend','<p class="error">'+esc(err.message)+'</p>');input.value=text;}finally{setChatBusy(false);}};
 (async()=>{try{$('#status').textContent='Ready';await loadNotes();}catch(e){showError(e);}})();
 </script></body></html>"""
 
@@ -640,15 +641,14 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         )
-        if html:
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-        else:
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+        # Content-Type is set by the caller: JSON, HTML, and the SSE stream
+        # each declare their own media type.
 
     def _json(self, status: int, payload: Any) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self._security_headers()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -730,6 +730,7 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 body = _HTML_PAGE.encode("utf-8")
                 self.send_response(200)
                 self._security_headers(html=True)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 if query_token and secrets.compare_digest(query_token, self.token):
                     self.send_header(
                         "Set-Cookie",
@@ -760,6 +761,7 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 body = payload.encode("utf-8")
                 self.send_response(200)
                 self._security_headers()
+                self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Disposition", 'attachment; filename="hermes-workspace.json"')
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -836,6 +838,9 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
             if path == "/api/terminal":
                 self._json(200, _bounded_terminal(data.get("input", "")))
                 return
+            if path == "/api/chat/stream":
+                self._stream_chat(data)
+                return
             if path == "/api/chat":
                 self._json(
                     200,
@@ -856,6 +861,43 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             print(f"[workspace] mutation failed: {exc!r}", file=sys.stderr)
             self._error(500, "internal error")
+
+    def _stream_chat(self, data: dict[str, Any]) -> None:
+        """Stream a chat reply as Server-Sent Events."""
+        message = _clean_text(data.get("message", ""), "message", 100_000)
+        context = _clean_text(data.get("context", ""), "context", MAX_CONTENT, required=False)
+        if context:
+            self.store.append_chat_message("user", f"Shared note:\n{context}", backend="context")
+        self.store.append_chat_message("user", message)
+        history = self.store.list_chat_messages(limit=20)
+        self.send_response(200)
+        self._security_headers()
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        # The body has no content length: the client reads until EOF, so the
+        # connection must close when the stream ends.
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        collected: list[str] = []
+
+        def emit(payload: dict[str, Any]) -> None:
+            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            for delta in _stream_deltas(history):
+                if not delta:
+                    continue
+                collected.append(delta)
+                emit({"delta": delta})
+        except Exception as exc:
+            emit({"error": str(exc)})
+            return
+        reply = "".join(collected).strip()
+        if reply:
+            self.store.append_chat_message("assistant", reply, backend="stream")
+        emit({"done": True, "reply": reply})
 
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
@@ -1060,6 +1102,106 @@ def _run_hermes_cli_chat(message: str) -> dict[str, Any]:
         detail = (result.stderr or result.stdout or "no output").strip()[-500:]
         raise ValueError(f"Hermes chat failed (exit {result.returncode}): {detail}")
     return {"reply": reply, "backend": "hermes-cli"}
+
+
+def _stream_hermes_provider(messages: list[dict[str, str]]) -> Iterator[str]:
+    """Yield text deltas from Hermes' auxiliary router (stream=True)."""
+    try:
+        from agent.auxiliary_client import call_llm
+    except ImportError as exc:
+        raise ValueError(f"Hermes provider runtime unavailable: {exc}") from exc
+    model = os.environ.get("HERMES_WORKSPACE_MODEL", "").strip() or None
+    try:
+        stream = call_llm(
+            task="workspace_chat",
+            model=model,
+            messages=messages,
+            timeout=120,
+            stream=True,
+        )
+    except Exception as exc:
+        raise ValueError(f"Hermes provider call failed: {exc}") from exc
+    if hasattr(stream, "choices"):
+        # Some adapters answer with a completed response instead of a stream.
+        choice = getattr(stream, "choices", [None])[0]
+        content = getattr(getattr(choice, "message", None), "content", None)
+        if isinstance(content, list):
+            content = "".join(
+                str(part.get("text", "")) for part in content if isinstance(part, dict)
+            )
+        if content:
+            yield str(content)
+        return
+    for chunk in stream:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            continue
+        delta = getattr(choices[0], "delta", None)
+        text = getattr(delta, "content", None)
+        if text is None:
+            text = getattr(getattr(choices[0], "message", None), "content", None)
+        if isinstance(text, list):
+            text = "".join(str(part.get("text", "")) for part in text if isinstance(part, dict))
+        if text:
+            yield str(text)
+
+
+def _stream_openai(messages: list[dict[str, str]]) -> Iterator[str]:
+    """Yield text deltas from an OpenAI-compatible streaming endpoint."""
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    model = os.environ.get("HERMES_WORKSPACE_MODEL", "gpt-4o-mini")
+    if not api_key:
+        raise ValueError("chat is not configured: set OPENAI_API_KEY")
+    payload = json.dumps(
+        {"model": model, "messages": messages, "stream": True}
+    ).encode()
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    try:
+        response = urllib.request.urlopen(req, timeout=120)
+    except Exception as exc:
+        raise ValueError(f"model request failed: {exc}") from exc
+    with response:
+        for raw in response:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload_text = line[5:].strip()
+            if payload_text == "[DONE]":
+                return
+            try:
+                chunk = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta") or {}
+                text = delta.get("content")
+                if text:
+                    yield str(text)
+
+
+def _stream_deltas(messages: list[dict[str, str]]) -> Iterator[str]:
+    """Stream deltas from the configured backend, falling back to one delta."""
+    backend = os.environ.get("HERMES_WORKSPACE_CHAT_BACKEND", "hermes").strip().lower()
+    if backend == "openai":
+        yield from _stream_openai(messages)
+        return
+    try:
+        yield from _stream_hermes_provider(messages)
+        return
+    except ValueError:
+        if backend != "auto":
+            raise
+    result = _chat_with_messages(messages)
+    yield result["reply"]
 
 
 def _last_user_message(messages: list[dict[str, str]]) -> str:
