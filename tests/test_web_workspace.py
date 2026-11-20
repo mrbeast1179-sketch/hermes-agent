@@ -312,6 +312,27 @@ def test_chat_context_is_shared_with_provider(server, monkeypatch):
     assert any(m["backend"] == "context" for m in history["messages"])
 
 
+def test_inbox_add_and_status_actions(server):
+    base, _ = server
+    status, created, _ = request(base, "/api/inbox", method="POST", payload={"text": "Capture this"})
+    assert status == 201
+    assert created["item"]["text"] == "Capture this"
+    assert created["item"]["status"] == "open"
+
+    status, listed, _ = request(base, "/api/inbox")
+    assert [i["text"] for i in listed["items"]] == ["Capture this"]
+
+    status, done, _ = request(base, "/api/inbox/" + created["item"]["id"], method="PATCH", payload={"status": "done"})
+    assert status == 200
+    assert done["item"]["status"] == "done"
+    assert request(base, "/api/inbox?status=open")[0] == 200
+    assert [i["text"] for i in request(base, "/api/inbox?status=open")[1]["items"]] == []
+
+    status, arch, _ = request(base, "/api/inbox/" + created["item"]["id"], method="PATCH", payload={"status": "archived"})
+    assert status == 200
+    assert arch["item"]["status"] == "archived"
+
+
 def test_tag_summary_and_sorting(server):
     base, _ = server
     request(base, "/api/notes", method="POST", payload={"title": "Charlie", "tags": ["alpha", "shared"]})

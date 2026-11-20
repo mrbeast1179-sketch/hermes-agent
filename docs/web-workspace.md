@@ -54,6 +54,13 @@ local-first editor that starts in under a second and needs no gateway.
 Updates use optimistic concurrency: a stale `version` returns HTTP 409 so a
 second tab cannot silently overwrite the first tab's edits.
 
+## Inbox
+
+The Inbox panel captures thoughts with an input and Add button (Enter also
+works). Each item can be marked Done or Archived; the list is stored in the
+workspace database and included in export. `GET /api/inbox?status=open`
+filters by status.
+
 ## Finding and moving notes
 
 The notes list has a text search, a tag filter populated from live tag
@@ -86,6 +93,10 @@ workspace never reads or stores an API key.
 `POST /api/chat` calls `agent.auxiliary_client.call_llm` in-process. Spawning
 `hermes chat` for this would start a second installation, which Hermes'
 shared-profile guard refuses; the in-process router avoids that entirely.
+
+While a reply is in flight the Send button is disabled and a "Hermes is
+thinking" indicator shows elapsed seconds; on failure the draft text is
+restored instead of being lost.
 
 The conversation is persisted in the same SQLite database, so it survives
 restarts and reloads, and it is included in the workspace export. Each turn
