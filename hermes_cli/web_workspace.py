@@ -1039,16 +1039,24 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
         self.end_headers()
         collected: list[str] = []
 
-        def emit(payload: dict[str, Any]) -> None:
-            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
-            self.wfile.flush()
+        def emit(payload: dict[str, Any]) -> bool:
+            """Write one SSE event. Returns False when the client is gone."""
+            try:
+                self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return False
+            return True
 
         try:
             for delta in _stream_deltas(history):
                 if not delta:
                     continue
                 collected.append(delta)
-                emit({"delta": delta})
+                if not emit({"delta": delta}):
+                    return
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except Exception as exc:
             emit({"error": str(exc)})
             return
@@ -1490,6 +1498,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token", default=None, help="bearer token (generated when omitted)")
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser")
     parser.add_argument("--check", action="store_true", help="verify the workspace and exit")
+    parser.add_argument("--export", default=None, help="write a JSON backup to PATH (or - for stdout)")
+    parser.add_argument("--import", dest="import_file", default=None, help="import notes from a JSON backup")
     return parser
 
 
@@ -1581,6 +1591,32 @@ def check_workspace(root: Path | str | None = None) -> dict[str, Any]:
 
 def cmd_workspace(args) -> int:
     """CLI adapter for ``hermes workspace``."""
+    export_path = getattr(args, "export", None)
+    import_path = getattr(args, "import_file", None)
+    if export_path or import_path:
+        root = Path(getattr(args, "root", None) or default_workspace_root())
+        store = WorkspaceStore(root)
+        try:
+            if export_path:
+                payload = json.dumps(store.export_all(), indent=2, ensure_ascii=False)
+                if export_path == "-":
+                    print(payload)
+                else:
+                    Path(export_path).write_text(payload + "\n", encoding="utf-8")
+                    live = len(store.list_notes())
+                    trashed = len(store.list_notes(include_deleted=True))
+                    suffix = f"; {trashed} trashed note(s) are not included" if trashed else ""
+                    print(f"Exported {live} notes to {export_path}{suffix}")
+            if import_path:
+                data = json.loads(Path(import_path).read_text(encoding="utf-8"))
+                imported = store.import_notes(data.get("notes") if isinstance(data, dict) else data)
+                print(f"Imported {imported} notes into {root}")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Workspace backup failed: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            store.close()
+        return 0
     if getattr(args, "check", False):
         result = check_workspace(getattr(args, "root", None))
         print(f"Workspace check: {result['root']}")

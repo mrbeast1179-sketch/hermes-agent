@@ -424,6 +424,46 @@ def test_chat_stream_emits_deltas_and_persists_reply(server, monkeypatch):
     assert history["messages"][-1]["content"] == "Streamed reply here"
 
 
+def test_chat_stream_survives_client_disconnect(server, monkeypatch):
+    """A client that hangs up mid-stream must not raise a server traceback."""
+    base, _ = server
+    from types import ModuleType, SimpleNamespace
+
+    module = ModuleType("agent.auxiliary_client")
+
+    def fake_call_llm(**kwargs):
+        def chunks():
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="one "))])
+            raise BrokenPipeError("client went away")
+
+        return chunks()
+
+    module.call_llm = fake_call_llm
+    package = ModuleType("agent")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "hermes")
+
+    req = urllib.request.Request(
+        base + "/api/chat/stream",
+        data=json.dumps({"message": "stream please"}).encode(),
+        headers={
+            "Authorization": "Bearer test-token-1234567890",
+            "Origin": base,
+            "X-Workspace-CSRF": "test-token-1234567890",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        body = response.read().decode()
+    assert "one " in body
+    # A dropped stream is not stored as a finished assistant reply.
+    _, history, _ = request(base, "/api/chat")
+    assert [m["role"] for m in history["messages"]] == ["user"]
+
+
 def test_chat_stream_reports_provider_errors(server, monkeypatch):
     base, _ = server
     from types import ModuleType
@@ -457,6 +497,40 @@ def test_chat_stream_reports_provider_errors(server, monkeypatch):
     # A failed turn must not be stored as an assistant reply.
     _, history, _ = request(base, "/api/chat")
     assert [m["role"] for m in history["messages"]] == ["user"]
+
+
+def _backup_args(root, **kwargs):
+    values = {"root": str(root), "check": False, "port": 8787, "host": "127.0.0.1",
+              "token": None, "no_browser": True, "export": None, "import_file": None}
+    values.update(kwargs)
+    return type("Args", (), values)()
+
+
+def test_cli_export_and_import_round_trip(tmp_path: Path, capsys):
+    root = tmp_path / "workspace"
+    store = web_workspace.WorkspaceStore(root)
+    store.create_note("Backed up", "body", ["keep"])
+    store.close()
+
+    backup = tmp_path / "backup.json"
+    assert web_workspace.cmd_workspace(_backup_args(root, export=str(backup))) == 0
+    assert "Exported 1 notes to " in capsys.readouterr().out
+    payload = json.loads(backup.read_text())
+    assert payload["format"] == "hermes-workspace-v1"
+    assert payload["notes"][0]["title"] == "Backed up"
+
+    other_root = tmp_path / "other-workspace"
+    assert web_workspace.cmd_workspace(_backup_args(other_root, import_file=str(backup))) == 0
+    assert "Imported 1 notes" in capsys.readouterr().out
+    store = web_workspace.WorkspaceStore(other_root)
+    try:
+        titles = [note["title"] for note in store.list_notes()]
+        assert titles == ["Backed up"]
+    finally:
+        store.close()
+
+    assert web_workspace.cmd_workspace(_backup_args(root, export=str(tmp_path / "missing-dir" / "x.json"))) == 1
+    assert web_workspace.cmd_workspace(_backup_args(root, import_file=str(tmp_path / "does-not-exist.json"))) == 1
 
 
 def test_chat_history_returns_safe_assistant_html(server, monkeypatch):

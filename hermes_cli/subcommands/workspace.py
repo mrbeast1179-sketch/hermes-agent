@@ -37,4 +37,8 @@ def build_workspace_parser(subparsers, *, cmd_workspace: Callable) -> None:
         action="store_true",
         help="verify the workspace (database, schema, renderer, loopback) and exit",
     )
+    parser.add_argument("--export", default=None, help="write a JSON backup to PATH (or - for stdout)")
+    parser.add_argument(
+        "--import", dest="import_file", default=None, help="import notes from a JSON backup"
+    )
     parser.set_defaults(func=cmd_workspace)

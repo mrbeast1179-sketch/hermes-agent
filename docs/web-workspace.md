@@ -106,6 +106,19 @@ never rewritten and the restore itself can be undone.
 | `⌘N` / `Ctrl+N` | Start a new note |
 | `⌘K` / `Ctrl+K` | Focus the search box |
 
+## Headless backup and restore
+
+```bash
+hermes workspace --export backup.json     # write a JSON backup
+hermes workspace --export -               # write it to stdout
+hermes workspace --import backup.json     # import notes from a backup
+```
+
+Both run without starting the server and accept `--root` to pick the
+workspace directory. Imports always assign fresh ids, so restoring a
+backup never overwrites existing notes. Trashed notes are not part of a
+backup; the export command says so when any exist.
+
 ## Self-check
 
 ```bash
