@@ -83,6 +83,8 @@ notes changed.
 
 ## Importing Markdown files
 
+The Download button saves the current note as `<slugified-title>.md`.
+
 The Import button accepts a workspace JSON export or a single Markdown or
 text file. A `.md`, `.markdown`, or `.txt` file becomes a new note titled
 after the file name, with the file contents as the note body, and opens in
@@ -137,6 +139,9 @@ Both run without starting the server and accept `--root` to pick the
 workspace directory. Imports always assign fresh ids, so restoring a
 backup never overwrites existing notes. Trashed notes are not part of a
 backup; the export command says so when any exist.
+
+The read-only terminal keeps the last eight commands as clickable links,
+so a command can be repeated without retyping it. Enter runs the command.
 
 ## Self-check
 
@@ -199,7 +204,9 @@ Replies stream: the panel renders text as it arrives instead of waiting for
 the full answer. While a reply is in flight the Send button is disabled and
 a "Hermes is thinking" indicator shows elapsed seconds; on failure the
 draft text is restored instead of being lost. The streamed reply is stored
-in the conversation exactly like a non-streamed one.
+in the conversation exactly like a non-streamed one. Stop abandons waiting
+for a reply (the generation still finishes server-side and is stored, so it
+appears in history) instead of leaving you blocked.
 
 The stream endpoint emits `{"delta": "..."}` events and a final
 `{"done": true, "reply": "..."}` event; a provider failure is reported as
