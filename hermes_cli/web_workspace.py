@@ -126,6 +126,15 @@ class WorkspaceStore:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS chat_messages_id_idx ON chat_messages(id);
+                CREATE TABLE IF NOT EXISTS note_versions (
+                    note_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (note_id, version)
+                );
                 """
             )
             # Migrate databases created before soft delete existed.
@@ -156,6 +165,62 @@ class WorkspaceStore:
             note["html"] = render_markdown(row["content"])
         return note
 
+    def _snapshot(self, note: dict[str, Any]) -> None:
+        """Store an immutable copy of a note version."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO note_versions"
+                "(note_id,version,title,content,tags,created_at) VALUES(?,?,?,?,?,?)",
+                (
+                    note["id"],
+                    int(note["version"]),
+                    note["title"],
+                    note.get("content", ""),
+                    json.dumps(note.get("tags", [])),
+                    _now(),
+                ),
+            )
+
+    def list_versions(self, note_id: str) -> list[dict[str, Any]]:
+        """Every stored version of a note, newest first."""
+        if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
+            raise KeyError(note_id)
+        rows = self._db.execute(
+            "SELECT note_id,version,title,content,tags,created_at FROM note_versions"
+            " WHERE note_id=? ORDER BY version DESC",
+            (note_id,),
+        ).fetchall()
+        return [
+            {
+                "note_id": row["note_id"],
+                "version": row["version"],
+                "title": row["title"],
+                "content": row["content"],
+                "tags": json.loads(row["tags"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def restore_version(self, note_id: str, version: int) -> dict[str, Any]:
+        """Restore a stored version as a new version of the note."""
+        if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
+            raise KeyError(note_id)
+        row = self._db.execute(
+            "SELECT title,content,tags FROM note_versions WHERE note_id=? AND version=?",
+            (note_id, int(version)),
+        ).fetchone()
+        if row is None:
+            raise KeyError(note_id)
+        current = self.get_note(note_id, include_deleted=False)
+        return self.update_note(
+            note_id,
+            row["title"],
+            row["content"],
+            json.loads(row["tags"]),
+            int(current["version"]),
+        )
+
     def create_note(
         self, title: str, content: str = "", tags: list[str] | None = None
     ) -> dict[str, Any]:
@@ -172,7 +237,9 @@ class WorkspaceStore:
                 "INSERT INTO notes(id,title,content,tags,created_at,updated_at,version) VALUES(?,?,?,?,?,?,1)",
                 (note_id, title, content, json.dumps(tags), timestamp, timestamp),
             )
-        return self.get_note(note_id)
+        note = self.get_note(note_id)
+        self._snapshot(note)
+        return note
 
     def get_note(self, note_id: str, *, include_deleted: bool = True) -> dict[str, Any]:
         if not isinstance(note_id, str) or not NOTE_ID_RE.fullmatch(note_id):
@@ -300,7 +367,9 @@ class WorkspaceStore:
                 "UPDATE notes SET title=?, content=?, tags=?, updated_at=?, version=version+1 WHERE id=?",
                 (title, content, json.dumps(tags), timestamp, note_id),
             )
-        return self.get_note(note_id)
+        note = self.get_note(note_id)
+        self._snapshot(note)
+        return note
 
     def delete_note(self, note_id: str, version: int) -> dict[str, Any]:
         """Move a note to trash. The row survives until it is purged."""
@@ -633,8 +702,9 @@ _HTML_PAGE = r"""<!doctype html>
 <nav class="rail"><h1 class="brand">Hermes</h1><button class="active" data-panel="notes">Notes</button><button data-panel="chat">Chat</button><button data-panel="inbox">Inbox</button><button data-panel="trash">Trash</button><button data-panel="sessions">Sessions</button><button data-panel="terminal">Terminal</button><button data-panel="system">System</button><div class="status" id="status">Connecting…</div></nav>
 <section class="list" id="list-panel"><div class="list-head"><input id="note-search" placeholder="Search notes"></div><div class="list-head"><select id="note-tag-filter"><option value="">All tags</option></select><select id="note-sort"><option value="updated">Recently updated</option><option value="created">Newest first</option><option value="title">Title A–Z</option></select><button id="manage-tags" title="Rename or remove a tag">Tags</button></div><div id="note-list"></div></section>
 <section class="editor" id="editor-panel">
-<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button><button id="pin-note">Pin</button><button id="duplicate-note">Duplicate</button><button id="ask-about-note">Ask about this note</button><button id="export-notes">Export</button><label class="import-label">Import<input id="import-notes" type="file" accept="application/json,.json"></label></div><p class="muted shortcuts">Shortcuts: ⌘S save · ⌘N new note · ⌘K search</p><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
+<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button><button id="pin-note">Pin</button><button id="duplicate-note">Duplicate</button><button id="history-note">History</button><button id="ask-about-note">Ask about this note</button><button id="export-notes">Export</button><label class="import-label">Import<input id="import-notes" type="file" accept="application/json,.json"></label></div><p class="muted shortcuts">Shortcuts: ⌘S save · ⌘N new note · ⌘K search</p><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
 <div id="inbox-view" hidden><h1>Inbox</h1><div class="toolbar"><input id="inbox-input" placeholder="Capture a thought…"><button class="primary" id="add-inbox">Add</button></div><div id="inbox-list"></div></div>
+<div id="history-view" hidden><h1>History</h1><p class="muted">Every saved version of this note.</p><div id="history-list"></div></div>
 <div id="trash-view" hidden><h1>Trash</h1><p class="muted">Deleted notes stay here until you purge them.</p><div id="trash-list"></div></div>
 <div id="sessions-view" hidden><h1>Recent sessions</h1><div id="sessions-list"></div></div>
 <div id="terminal-view" hidden><h1>Read-only terminal</h1><div class="toolbar"><input id="term-input" value="pwd"><button id="run-term">Run</button></div><pre id="term-output" class="term"></pre></div>
@@ -655,6 +725,7 @@ function clearDraft(){try{localStorage.removeItem(draftKey());}catch(e){}}
 function restoreDraft(){try{const raw=localStorage.getItem(draftKey());if(!raw)return false;const d=JSON.parse(raw);if(!d||(!d.title&&!d.content))return false;$('#note-title').value=d.title||'';$('#note-tags').value=d.tags||'';$('#note-content').value=d.content||'';return true;}catch(e){return false;}}
 async function loadTags(){const tags=(await api('/api/tags')).tags;const sel=$('#note-tag-filter');const current=sel.value;sel.innerHTML='<option value="">All tags</option>'+tags.map(t=>`<option value="${esc(t.tag)}">${esc(t.tag)} (${t.count})</option>`).join('');if(tags.some(t=>t.tag===current))sel.value=current;}
 async function loadNotes(){notes=(await api('/api/notes?q='+encodeURIComponent($('#note-search').value)+'&tag='+encodeURIComponent($('#note-tag-filter').value)+'&sort='+encodeURIComponent($('#note-sort').value))).notes;await loadTags();$('#note-list').innerHTML=notes.map(n=>`<div class="note-card ${selected===n.id?'active':''}" data-id="${esc(n.id)}"><strong>${n.pinned?'📌 ':''}${esc(n.title)}</strong><small>${esc(n.tags.join(', '))} · v${n.version}</small></div>`).join('')||'<p class="muted">No notes yet.</p>';$$('.note-card').forEach(el=>el.onclick=()=>selectNote(el.dataset.id));}
+async function showHistory(){if(!selected){showError(new Error('Select a note first'));return;}const versions=(await api('/api/notes/'+selected+'/versions')).versions;$('#history-list').innerHTML=versions.map(v=>`<div class="note-card"><strong>v${v.version} · ${esc(v.title)}</strong><small class="muted">${esc(v.created_at)} · ${esc(v.tags.join(', '))}</small><div><button data-restore-version="${v.version}">Restore</button></div></div>`).join('')||'<p class="muted">No versions stored.</p>';$$('#history-list [data-restore-version]').forEach(b=>b.onclick=async()=>{const r=await api('/api/notes/'+selected+'/versions/'+b.dataset.restoreVersion+'/restore',{method:'POST'});version=r.note.version;$('#note-title').value=r.note.title;$('#note-tags').value=r.note.tags.join(', ');$('#note-content').value=r.note.content;$('#note-preview').innerHTML=r.note.html;await showHistory();await loadNotes();$('#status').textContent='Restored v'+b.dataset.restoreVersion;$('#status').className='status success';});await switchPanel('history');}
 async function duplicateNote(){if(!selected){showError(new Error('Select a note first'));return;}const r=await api('/api/notes/'+selected+'/duplicate',{method:'POST'});selected=r.note.id;version=r.note.version;$('#note-title').value=r.note.title;$('#note-tags').value=r.note.tags.join(', ');$('#note-content').value=r.note.content;$('#note-preview').innerHTML=r.note.html;await loadNotes();$('#status').textContent='Duplicated';$('#status').className='status success';}
 async function manageTags(){const tag=$('#note-tag-filter').value;if(!tag){showError(new Error('Pick a tag in the filter first'));return;}const action=prompt('Tag actions for "'+tag+'"\nType a new name to rename it, or "-" to remove it from every note.','-');if(action===null)return;const value=action.trim();if(!value)return;try{if(value==='-'){const r=await api('/api/tags/'+encodeURIComponent(tag),{method:'DELETE'});$('#status').textContent='Removed tag from '+r.changed+' notes';}else{const r=await api('/api/tags/rename',{method:'POST',body:JSON.stringify({old:tag,new:value})});$('#status').textContent='Renamed tag on '+r.changed+' notes';}$('#status').className='status success';$('#note-tag-filter').value='';await loadTags();await loadNotes();}catch(e){showError(e);}}
 async function togglePin(){if(!selected){showError(new Error('Select a note first'));return;}const note=notes.find(n=>n.id===selected);if(!note)return;const r=await api('/api/notes/'+selected+'/pin',{method:'POST',body:JSON.stringify({pinned:!note.pinned})});$('#pin-note').textContent=r.note.pinned?'Unpin':'Pin';await loadNotes();}
@@ -662,8 +733,8 @@ async function selectNote(id){selected=id;const {note}=await api('/api/notes/'+i
 async function saveNote(){if(!$('#note-title').value.trim())return showError(new Error('Title is required'));const wasNew=!selected;const body={title:$('#note-title').value,content:$('#note-content').value,tags:$('#note-tags').value.split(',').map(x=>x.trim()).filter(Boolean),version};if(selected){const {note}=await api('/api/notes/'+selected,{method:'PUT',body:JSON.stringify(body)});version=note.version;$('#note-preview').innerHTML=note.html;}else{const {note}=await api('/api/notes',{method:'POST',body:JSON.stringify(body)});selected=note.id;version=note.version;$('#note-preview').innerHTML=note.html;}clearDraft();if(wasNew){try{localStorage.removeItem('workspace-draft-new');}catch(e){}}await loadNotes();$('#status').textContent='Saved';$('#status').className='status success';}
 async function newNote(){selected=null;version=1;$('#note-title').value='';$('#note-tags').value='';$('#note-content').value='';$('#note-preview').innerHTML='';clearDraft();}
 async function deleteNote(){if(!selected||!confirm('Move this note to trash?'))return;try{await api('/api/notes/'+selected,{method:'DELETE',body:JSON.stringify({version})});await newNote();await loadNotes();$('#status').textContent='Moved to trash';$('#status').className='status success';}catch(e){showError(e);}}
-async function switchPanel(name){$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','chat','inbox','trash','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;if(name==='chat'){await renderChatHistory();}$('#list-panel').hidden=name!=='notes';if(name==='inbox'){await renderInbox();}if(name==='trash'){const notes=(await api('/api/trash')).notes;$('#trash-list').innerHTML=notes.map(n=>`<div class="note-card"><strong>${esc(n.title)}</strong><small class="muted">deleted ${esc(n.deleted_at||'')}</small><div><button data-restore="${esc(n.id)}" data-version="${n.version}">Restore</button> <button data-purge="${esc(n.id)}" data-version="${n.version}">Purge</button></div></div>`).join('')||'<p class="muted">Trash is empty.</p>';$$('#trash-list [data-restore]').forEach(b=>b.onclick=async()=>{await api('/api/notes/'+b.dataset.restore+'/restore',{method:'POST',body:JSON.stringify({version:Number(b.dataset.version)})});await loadNotes();await switchPanel('trash');});$$('#trash-list [data-purge]').forEach(b=>b.onclick=async()=>{if(!confirm('Permanently delete this note?'))return;await api('/api/notes/'+b.dataset.purge+'/purge',{method:'DELETE',body:JSON.stringify({version:Number(b.dataset.version)})});await switchPanel('trash');});}if(name==='sessions'){$('#sessions-list').innerHTML=(await api('/api/sessions')).sessions.map(s=>`<p>${esc(s.title||s.id)} <small class="muted">${esc(s.source||'')}</small></p>`).join('');}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
-$('#note-tag-filter').onchange=()=>loadNotes().catch(showError);$('#note-sort').onchange=()=>loadNotes().catch(showError);$('#export-notes').onclick=async()=>{try{const data=await api('/api/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='hermes-workspace.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#status').textContent='Exported '+data.notes.length+' notes';$('#status').className='status success';}catch(e){showError(e);}};$('#import-notes').onchange=async e=>{const file=e.target.files&&e.target.files[0];if(!file)return;try{const payload=JSON.parse(await file.text());const result=await api('/api/import',{method:'POST',body:JSON.stringify({notes:payload.notes||payload})});await loadTags();await loadNotes();$('#status').textContent='Imported '+result.imported+' notes';$('#status').className='status success';}catch(err){showError(err);}e.target.value='';};$('#save-note').onclick=()=>saveNote().catch(showError);$('#pin-note').onclick=()=>togglePin().catch(showError);$('#duplicate-note').onclick=()=>duplicateNote().catch(showError);$('#manage-tags').onclick=()=>manageTags().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);$('#note-title').oninput=saveDraft;$('#note-tags').oninput=saveDraft;let previewTimer=null;$('#note-content').oninput=()=>{saveDraft();clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
+async function switchPanel(name){$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','chat','inbox','history','trash','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;if(name==='chat'){await renderChatHistory();}$('#list-panel').hidden=name!=='notes';if(name==='inbox'){await renderInbox();}if(name==='trash'){const notes=(await api('/api/trash')).notes;$('#trash-list').innerHTML=notes.map(n=>`<div class="note-card"><strong>${esc(n.title)}</strong><small class="muted">deleted ${esc(n.deleted_at||'')}</small><div><button data-restore="${esc(n.id)}" data-version="${n.version}">Restore</button> <button data-purge="${esc(n.id)}" data-version="${n.version}">Purge</button></div></div>`).join('')||'<p class="muted">Trash is empty.</p>';$$('#trash-list [data-restore]').forEach(b=>b.onclick=async()=>{await api('/api/notes/'+b.dataset.restore+'/restore',{method:'POST',body:JSON.stringify({version:Number(b.dataset.version)})});await loadNotes();await switchPanel('trash');});$$('#trash-list [data-purge]').forEach(b=>b.onclick=async()=>{if(!confirm('Permanently delete this note?'))return;await api('/api/notes/'+b.dataset.purge+'/purge',{method:'DELETE',body:JSON.stringify({version:Number(b.dataset.version)})});await switchPanel('trash');});}if(name==='sessions'){$('#sessions-list').innerHTML=(await api('/api/sessions')).sessions.map(s=>`<p>${esc(s.title||s.id)} <small class="muted">${esc(s.source||'')}</small></p>`).join('');}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
+$('#note-tag-filter').onchange=()=>loadNotes().catch(showError);$('#note-sort').onchange=()=>loadNotes().catch(showError);$('#export-notes').onclick=async()=>{try{const data=await api('/api/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='hermes-workspace.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#status').textContent='Exported '+data.notes.length+' notes';$('#status').className='status success';}catch(e){showError(e);}};$('#import-notes').onchange=async e=>{const file=e.target.files&&e.target.files[0];if(!file)return;try{const payload=JSON.parse(await file.text());const result=await api('/api/import',{method:'POST',body:JSON.stringify({notes:payload.notes||payload})});await loadTags();await loadNotes();$('#status').textContent='Imported '+result.imported+' notes';$('#status').className='status success';}catch(err){showError(err);}e.target.value='';};$('#save-note').onclick=()=>saveNote().catch(showError);$('#pin-note').onclick=()=>togglePin().catch(showError);$('#duplicate-note').onclick=()=>duplicateNote().catch(showError);$('#history-note').onclick=()=>showHistory().catch(showError);$('#manage-tags').onclick=()=>manageTags().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);$('#note-title').oninput=saveDraft;$('#note-tags').oninput=saveDraft;let previewTimer=null;$('#note-content').oninput=()=>{saveDraft();clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
 document.addEventListener('keydown',e=>{const mod=e.metaKey||e.ctrlKey;if(!mod)return;const key=e.key.toLowerCase();if(key==='s'){e.preventDefault();saveNote().catch(showError);}else if(key==='n'){e.preventDefault();newNote();}else if(key==='k'){e.preventDefault();$('#note-search').focus();}});
 async function renderInbox(){const items=(await api('/api/inbox')).items;$('#inbox-list').innerHTML=items.map(i=>`<div class="note-card"><strong>${esc(i.text)}</strong><small class="muted">${esc(i.status)} · ${esc(i.created_at)}</small><div>${i.status!=='done'?`<button data-inbox-done="${esc(i.id)}">Done</button>`:''} ${i.status!=='archived'?`<button data-inbox-archive="${esc(i.id)}">Archive</button>`:''}</div></div>`).join('')||'<p class="muted">Nothing captured yet.</p>';$$('#inbox-list [data-inbox-done]').forEach(b=>b.onclick=async()=>{await api('/api/inbox/'+b.dataset.inboxDone,{method:'PATCH',body:JSON.stringify({status:'done'})});await renderInbox();});$$('#inbox-list [data-inbox-archive]').forEach(b=>b.onclick=async()=>{await api('/api/inbox/'+b.dataset.inboxArchive,{method:'PATCH',body:JSON.stringify({status:'archived'})});await renderInbox();});}
 $('#add-inbox').onclick=async()=>{const text=$('#inbox-input').value.trim();if(!text)return;try{await api('/api/inbox',{method:'POST',body:JSON.stringify({text})});$('#inbox-input').value='';await renderInbox();}catch(e){showError(e);}};
@@ -828,6 +899,13 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            if path.startswith("/api/notes/") and path.endswith("/versions"):
+                note_id = path.removeprefix("/api/notes/").removesuffix("/versions")
+                try:
+                    self._json(200, {"versions": self.store.list_versions(note_id)})
+                except KeyError:
+                    self._error(404, "note not found")
+                return
             if path.startswith("/api/notes/"):
                 note_id = path.removeprefix("/api/notes/")
                 try:
@@ -877,6 +955,12 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/inbox":
                 self._json(201, {"item": self.store.create_inbox_item(data.get("text", ""))})
+                return
+            if path.startswith("/api/notes/") and "/versions/" in path and path.endswith("/restore"):
+                note_id, _, tail = path.removeprefix("/api/notes/").partition("/versions/")
+                version = int(tail.removesuffix("/restore"))
+                note = self.store.restore_version(note_id, version)
+                self._json(200, {"note": note})
                 return
             if path.startswith("/api/notes/") and path.endswith("/duplicate"):
                 note_id = path.removeprefix("/api/notes/").removesuffix("/duplicate")

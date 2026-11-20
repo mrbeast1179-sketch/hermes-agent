@@ -459,6 +459,40 @@ def test_chat_stream_reports_provider_errors(server, monkeypatch):
     assert [m["role"] for m in history["messages"]] == ["user"]
 
 
+def test_note_version_history_records_and_restores(server):
+    base, _ = server
+    _, created, _ = request(base, "/api/notes", method="POST", payload={
+        "title": "First title", "content": "first body", "tags": ["one"],
+    })
+    note_id = created["note"]["id"]
+
+    _, updated, _ = request(base, f"/api/notes/{note_id}", method="PUT", payload={
+        "title": "Second title", "content": "second body", "tags": ["one", "two"], "version": 1,
+    })
+    assert updated["note"]["version"] == 2
+
+    status, history, _ = request(base, f"/api/notes/{note_id}/versions")
+    assert status == 200
+    versions = history["versions"]
+    assert [v["version"] for v in versions] == [2, 1]
+    assert versions[1]["title"] == "First title"
+    assert versions[1]["content"] == "first body"
+    assert versions[1]["tags"] == ["one"]
+
+    # Restoring writes a NEW version rather than rewinding history.
+    status, restored, _ = request(base, f"/api/notes/{note_id}/versions/1/restore", method="POST")
+    assert status == 200
+    assert restored["note"]["version"] == 3
+    assert restored["note"]["title"] == "First title"
+    assert restored["note"]["content"] == "first body"
+    assert restored["note"]["tags"] == ["one"]
+
+    _, history, _ = request(base, f"/api/notes/{note_id}/versions")
+    assert [v["version"] for v in history["versions"]] == [3, 2, 1]
+    assert request(base, f"/api/notes/{note_id}/versions/99/restore", method="POST")[0] == 404
+    assert request(base, "/api/notes/not-a-note/versions")[0] == 404
+
+
 def test_duplicate_note_copies_content_and_tags(server):
     base, _ = server
     _, created, _ = request(base, "/api/notes", method="POST", payload={

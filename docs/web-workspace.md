@@ -51,6 +51,8 @@ local-first editor that starts in under a second and needs no gateway.
 | `DELETE` | `/api/notes/{id}/purge` | Permanently delete a trashed note |
 | `POST` | `/api/notes/{id}/pin` | Pin (`pinned: true`) or unpin a note |
 | `POST` | `/api/notes/{id}/duplicate` | Copy a note (content and tags) into a new note |
+| `GET` | `/api/notes/{id}/versions` | List every stored version of a note |
+| `POST` | `/api/notes/{id}/versions/{version}/restore` | Restore a stored version (as a new version) |
 | `POST` | `/api/tags/rename` | Rename a tag across every live note (`old`, `new`) |
 | `DELETE` | `/api/tags/{tag}` | Remove a tag from every live note |
 | `POST` | `/api/markdown/preview` | Render HTML without saving |
@@ -71,6 +73,13 @@ The Tags button next to the filter renames or removes the selected tag
 across every live note. Renaming keeps a note's other tags and never
 duplicates a tag; removing strips the tag everywhere. Both report how many
 notes changed.
+
+## Version history
+
+Every saved version of a note is stored, so an edit can be rolled back.
+The History button lists the versions newest first; restoring one applies
+its title, content, and tags as a **new** version, so the history itself is
+never rewritten and the restore itself can be undone.
 
 ## Keyboard shortcuts
 
