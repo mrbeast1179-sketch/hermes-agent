@@ -459,6 +459,21 @@ def test_chat_stream_reports_provider_errors(server, monkeypatch):
     assert [m["role"] for m in history["messages"]] == ["user"]
 
 
+def test_chat_history_returns_safe_assistant_html(server, monkeypatch):
+    base, _ = server
+    _fake_provider_module(monkeypatch, reply="## Summary\n\n**bold** <script>alert(1)</script>")
+    request(base, "/api/chat", method="POST", payload={"message": "give me markdown"})
+
+    _, history, _ = request(base, "/api/chat")
+    assistant = history["messages"][-1]
+    assert assistant["role"] == "assistant"
+    assert "<h2>Summary</h2>" in assistant["html"]
+    assert "<strong>bold</strong>" in assistant["html"]
+    assert "<script>" not in assistant["html"]
+    # User text stays plain and is escaped client-side, never rendered as HTML.
+    assert "html" not in history["messages"][0]
+
+
 def test_system_info_reports_workspace_root(server):
     base, _ = server
     status, payload, _ = request(base, "/api/system")

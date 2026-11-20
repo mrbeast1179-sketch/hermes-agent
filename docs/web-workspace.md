@@ -74,14 +74,22 @@ across every live note. Renaming keeps a note's other tags and never
 duplicates a tag; removing strips the tag everywhere. Both report how many
 notes changed.
 
+## Importing Markdown files
+
+The Import button accepts a workspace JSON export or a single Markdown or
+text file. A `.md`, `.markdown`, or `.txt` file becomes a new note titled
+after the file name, with the file contents as the note body, and opens in
+the editor.
+
 ## Linking and session shortcuts
 
 Selecting a note puts it in the URL (`#note=<id>`), so a note can be
 bookmarked or shared and reopening the link restores that note.
 
 The Sessions panel lists recent Hermes sessions with a copyable resume
-command (`hermes --resume <id>`). The System panel reports the workspace
-data directory alongside the platform and Hermes home.
+command (`hermes --resume <id>`), refreshing every 30 seconds while the
+panel is open. The System panel reports the workspace data directory
+alongside the platform and Hermes home.
 
 ## Version history
 
@@ -148,6 +156,11 @@ workspace never reads or stores an API key.
 `POST /api/chat` calls `agent.auxiliary_client.call_llm` in-process. Spawning
 `hermes chat` for this would start a second installation, which Hermes'
 shared-profile guard refuses; the in-process router avoids that entirely.
+
+Assistant replies render as safe Markdown (headings, bold, code, lists) in
+the chat log; your own messages stay plain text. Rendering is done on the
+server by the same escaping renderer the note preview uses, so a reply
+containing a script tag shows the text rather than executing it.
 
 Replies stream: the panel renders text as it arrives instead of waiting for
 the full answer. While a reply is in flight the Send button is disabled and
