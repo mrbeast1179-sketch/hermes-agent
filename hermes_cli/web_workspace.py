@@ -897,8 +897,92 @@ def _bounded_terminal(command: str) -> dict[str, Any]:
     return {"output": output, "exit_code": result.returncode}
 
 
+def _hermes_chat_command(message: str) -> list[str]:
+    """One-shot Hermes chat using the user's own configured provider.
+
+    Using the CLI keeps provider resolution, OAuth, and model selection in
+    Hermes where they belong: the workspace never has to read or copy an API
+    key. ``-m hermes_cli.main`` is used with the package root on PYTHONPATH
+    so this also works from a source checkout.
+    """
+    return [sys.executable, "-m", "hermes_cli.main", "chat", "-q", message]
+
+
+def _run_hermes_provider(message: str) -> dict[str, Any]:
+    """Call Hermes' auxiliary LLM router inside this process.
+
+    ``agent.auxiliary_client.call_llm`` resolves the user's configured
+    provider, model, and credentials. Running in-process avoids spawning a
+    second Hermes installation, which the shared-profile guard rejects.
+    """
+    try:
+        from agent.auxiliary_client import call_llm
+    except ImportError as exc:
+        raise ValueError(f"Hermes provider runtime unavailable: {exc}") from exc
+    model = os.environ.get("HERMES_WORKSPACE_MODEL", "").strip() or None
+    try:
+        response = call_llm(
+            task="workspace_chat",
+            model=model,
+            messages=[{"role": "user", "content": message}],
+            timeout=120,
+        )
+    except Exception as exc:
+        raise ValueError(f"Hermes provider call failed: {exc}") from exc
+    choice = getattr(response, "choices", [None])[0]
+    content = getattr(getattr(choice, "message", None), "content", None)
+    if isinstance(content, list):
+        content = "".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        )
+    if not content:
+        raise ValueError("Hermes provider returned no content")
+    return {"reply": str(content).strip(), "backend": "hermes-provider"}
+
+
+def _run_hermes_cli_chat(message: str) -> dict[str, Any]:
+    env = os.environ.copy()
+    package_root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+    env["HERMES_SESSION_SOURCE"] = "web-workspace"
+    model = os.environ.get("HERMES_WORKSPACE_MODEL", "").strip()
+    command = _hermes_chat_command(message)
+    if model:
+        command += ["-m", model]
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=180, check=False, env=env
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"could not start Hermes chat: {exc}") from exc
+    reply = result.stdout.strip()
+    if result.returncode != 0 or not reply:
+        detail = (result.stderr or result.stdout or "no output").strip()[-500:]
+        raise ValueError(f"Hermes chat failed (exit {result.returncode}): {detail}")
+    return {"reply": reply, "backend": "hermes-cli"}
+
+
 def _chat_reply(message: str) -> dict[str, Any]:
     message = _clean_text(message, "message", 100_000)
+    backend = os.environ.get("HERMES_WORKSPACE_CHAT_BACKEND", "hermes").strip().lower()
+    if backend == "cli":
+        return _run_hermes_cli_chat(message)
+    if backend in {"hermes", "auto"}:
+        try:
+            return _run_hermes_provider(message)
+        except ValueError:
+            if backend != "auto":
+                raise
+            # ``auto`` falls through to the CLI, then to a configured HTTP key.
+            try:
+                return _run_hermes_cli_chat(message)
+            except ValueError:
+                if not os.environ.get("OPENAI_API_KEY"):
+                    raise
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise ValueError(
+            "chat is not configured: Hermes CLI chat failed and OPENAI_API_KEY is not set"
+        )
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     api_key = os.environ.get("OPENAI_API_KEY", "")
     model = os.environ.get("HERMES_WORKSPACE_MODEL", "gpt-4o-mini")

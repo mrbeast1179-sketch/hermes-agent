@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -125,6 +126,122 @@ def test_csrf_allows_valid_mutation_and_security_headers(server):
         assert 'id="save-note"' in html
         assert 'id="note-preview"' in html
         assert "test-token-1234567890" not in html
+
+
+def test_chat_uses_hermes_cli_with_configured_provider(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = {}
+
+    def fake_run(command, **kwargs):
+        calls["command"] = command
+        calls["env"] = kwargs.get("env", {})
+        return SimpleNamespace(returncode=0, stdout="Provider reply" + chr(10), stderr="")
+
+    monkeypatch.setattr(web_workspace.subprocess, "run", fake_run)
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "cli")
+    result = web_workspace._chat_reply("hello")
+    assert result == {"reply": "Provider reply", "backend": "hermes-cli"}
+    assert calls["command"][:5] == [sys.executable, "-m", "hermes_cli.main", "chat", "-q"]
+    assert calls["command"][5] == "hello"
+    assert calls["env"]["HERMES_SESSION_SOURCE"] == "web-workspace"
+    assert package_root_in_env(calls["env"]["PYTHONPATH"])
+
+
+def test_chat_uses_in_process_hermes_provider(monkeypatch):
+    from types import ModuleType, SimpleNamespace
+
+    module = ModuleType("agent.auxiliary_client")
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="Provider reply"))]
+        )
+
+    module.call_llm = fake_call_llm
+    package = ModuleType("agent")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "hermes")
+    monkeypatch.delenv("HERMES_WORKSPACE_MODEL", raising=False)
+    result = web_workspace._chat_reply("hello")
+    assert result == {"reply": "Provider reply", "backend": "hermes-provider"}
+    assert captured["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured["task"] == "workspace_chat"
+    assert captured["model"] is None
+
+
+def test_chat_provider_empty_response_is_an_error(monkeypatch):
+    from types import ModuleType, SimpleNamespace
+
+    module = ModuleType("agent.auxiliary_client")
+    module.call_llm = lambda **kwargs: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=None))]
+    )
+    package = ModuleType("agent")
+    package.__path__ = []
+    monkeypatch.setitem(sys.modules, "agent", package)
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "hermes")
+    with pytest.raises(ValueError, match="no content"):
+        web_workspace._chat_reply("hello")
+
+
+def package_root_in_env(value):
+    import pathlib
+
+    return str(pathlib.Path(web_workspace.__file__).resolve().parent.parent) in value
+
+
+def test_chat_failure_reports_provider_error(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        web_workspace.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=2, stdout="", stderr="provider not configured"),
+    )
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "cli")
+    with pytest.raises(ValueError, match="provider not configured"):
+        web_workspace._chat_reply("hello")
+
+
+def test_openai_fallback_requires_key(monkeypatch):
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(ValueError):
+        web_workspace._chat_reply("hello")
+
+
+def test_openai_fallback_parses_provider_response(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "HTTP reply"}}]}).encode()
+
+    monkeypatch.setenv("HERMES_WORKSPACE_CHAT_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("HERMES_WORKSPACE_MODEL", "test-model")
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["auth"] = request.headers.get("Authorization")
+        return FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    result = web_workspace._chat_reply("hello")
+    assert result["reply"] == "HTTP reply"
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["auth"] == "Bearer test-key"
 
 
 def test_tag_summary_and_sorting(server):

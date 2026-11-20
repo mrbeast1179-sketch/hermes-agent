@@ -77,6 +77,27 @@ you are editing. If you close the tab or reload before saving, the draft is
 restored and the status bar says "Unsaved draft restored"; saving clears
 the draft.
 
+## Chat
+
+The chat panel uses Hermes' own provider configuration, so it works with
+whatever `hermes model` selected (including OAuth providers) and the
+workspace never reads or stores an API key.
+
+`POST /api/chat` calls `agent.auxiliary_client.call_llm` in-process. Spawning
+`hermes chat` for this would start a second installation, which Hermes'
+shared-profile guard refuses; the in-process router avoids that entirely.
+
+Optional environment overrides:
+
+| Variable | Effect |
+| --- | --- |
+| `HERMES_WORKSPACE_CHAT_BACKEND` | `hermes` (default, in-process router), `cli` (spawn `hermes chat -q`), `openai` (OpenAI-compatible HTTP), `auto` (try each in that order) |
+| `HERMES_WORKSPACE_MODEL` | Override the model used for chat |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | Credentials for the `openai` backend only |
+
+Verified against the live configured provider: a one-line prompt returned
+`workspace chat ok` with `backend=hermes-provider`.
+
 ## Tests
 
 ```bash
