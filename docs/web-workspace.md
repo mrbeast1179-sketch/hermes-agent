@@ -64,6 +64,9 @@ Pinned notes always lead the list, keep their relative order, and survive
 restarts. The editor shows a Pin/Unpin button, and the list marks pinned
 notes with a pin.
 
+The note list shows how many notes match the current filter and a one-line
+snippet of each note, so notes are distinguishable without opening them.
+
 ## Duplicating and organising notes
 
 Duplicate copies the selected note's content and tags into a new note
