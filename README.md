@@ -113,10 +113,18 @@ hermes tools        # Configure which tools are enabled
 hermes config set   # Set individual config values
 hermes config get   # Print individual config values
 hermes gateway      # Start the messaging gateway (Telegram, Discord, etc.)
+hermes workspace    # Local-first browser workspace (notes, inbox, sessions)
 hermes setup        # Run the full setup wizard (configures everything at once)
 hermes update       # Update to the latest version
 hermes doctor       # Diagnose any issues
 ```
+
+### Local browser workspace
+
+`hermes workspace` opens a small loopback-only workspace with durable notes,
+a safe live Markdown preview, an inbox, recent sessions, and a bounded
+read-only terminal. It starts in under a second and needs no gateway. See
+[docs/web-workspace.md](docs/web-workspace.md).
 
 📖 **[Full documentation →](https://hermes-agent.nousresearch.com/docs/)**
 
