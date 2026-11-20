@@ -529,6 +529,11 @@ def test_cli_export_and_import_round_trip(tmp_path: Path, capsys):
     finally:
         store.close()
 
+    # Windows editors commonly write a BOM before the JSON payload.
+    bom_backup = tmp_path / "bom.json"
+    bom_backup.write_text("﻿" + backup.read_text(encoding="utf-8"), encoding="utf-8")
+    assert web_workspace.cmd_workspace(_backup_args(tmp_path / "bom-workspace", import_file=str(bom_backup))) == 0
+
     assert web_workspace.cmd_workspace(_backup_args(root, export=str(tmp_path / "missing-dir" / "x.json"))) == 1
     assert web_workspace.cmd_workspace(_backup_args(root, import_file=str(tmp_path / "does-not-exist.json"))) == 1
 

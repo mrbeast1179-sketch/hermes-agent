@@ -1608,7 +1608,7 @@ def cmd_workspace(args) -> int:
                     suffix = f"; {trashed} trashed note(s) are not included" if trashed else ""
                     print(f"Exported {live} notes to {export_path}{suffix}")
             if import_path:
-                data = json.loads(Path(import_path).read_text(encoding="utf-8"))
+                data = json.loads(Path(import_path).read_text(encoding="utf-8-sig"))
                 imported = store.import_notes(data.get("notes") if isinstance(data, dict) else data)
                 print(f"Imported {imported} notes into {root}")
         except (OSError, ValueError, json.JSONDecodeError) as exc:
