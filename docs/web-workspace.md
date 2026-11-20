@@ -49,10 +49,34 @@ local-first editor that starts in under a second and needs no gateway.
 | `GET` | `/api/trash` | List trashed notes |
 | `POST` | `/api/notes/{id}/restore` | Restore a trashed note |
 | `DELETE` | `/api/notes/{id}/purge` | Permanently delete a trashed note |
+| `POST` | `/api/notes/{id}/pin` | Pin (`pinned: true`) or unpin a note |
 | `POST` | `/api/markdown/preview` | Render HTML without saving |
 
 Updates use optimistic concurrency: a stale `version` returns HTTP 409 so a
 second tab cannot silently overwrite the first tab's edits.
+
+Pinned notes always lead the list, keep their relative order, and survive
+restarts. The editor shows a Pin/Unpin button, and the list marks pinned
+notes with a pin.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `⌘S` / `Ctrl+S` | Save the current note |
+| `⌘N` / `Ctrl+N` | Start a new note |
+| `⌘K` / `Ctrl+K` | Focus the search box |
+
+## Self-check
+
+```bash
+hermes workspace --check
+```
+
+Verifies the database opens, the schema has every table, counts the stored
+notes/inbox/chat rows, confirms the Markdown renderer escapes unsafe
+markup, and confirms a loopback port can be bound. It exits non-zero when
+a check fails, so it is usable as a smoke test in scripts.
 
 ## Inbox
 

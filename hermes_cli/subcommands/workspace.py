@@ -32,4 +32,9 @@ def build_workspace_parser(subparsers, *, cmd_workspace: Callable) -> None:
         action="store_true",
         help="print the URL instead of opening it in a browser",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify the workspace (database, schema, renderer, loopback) and exit",
+    )
     parser.set_defaults(func=cmd_workspace)

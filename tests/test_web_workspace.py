@@ -312,6 +312,64 @@ def test_chat_context_is_shared_with_provider(server, monkeypatch):
     assert any(m["backend"] == "context" for m in history["messages"])
 
 
+def test_pinned_notes_sort_first_and_persist(server, tmp_path: Path):
+    base, _ = server
+    _, first, _ = request(base, "/api/notes", method="POST", payload={"title": "First created"})
+    _, second, _ = request(base, "/api/notes", method="POST", payload={"title": "Second created"})
+
+    status, pinned, _ = request(base, f"/api/notes/{second['note']['id']}/pin", method="POST", payload={"pinned": True})
+    assert status == 200
+    assert pinned["note"]["pinned"] is True
+
+    _, listed, _ = request(base, "/api/notes")
+    titles = [n["title"] for n in listed["notes"]]
+    # The pinned note leads; the other two share a timestamp, so only the
+    # leading position is deterministic.
+    assert titles[0] == "Second created"
+    assert sorted(titles) == ["First created", "Second created"]
+
+    # Pin state survives a restart.
+    store = web_workspace.WorkspaceStore(tmp_path / "workspace")
+    try:
+        reopened = store.get_note(second["note"]["id"])
+        assert reopened["pinned"] is True
+    finally:
+        store.close()
+
+    status, unpinned, _ = request(base, f"/api/notes/{second['note']['id']}/pin", method="POST", payload={"pinned": False})
+    assert status == 200
+    assert unpinned["note"]["pinned"] is False
+    assert request(base, "/api/notes/not-a-note/pin", method="POST", payload={"pinned": True})[0] == 404
+
+
+def test_workspace_self_check_reports_ok(tmp_path: Path, capsys):
+    result = web_workspace.check_workspace(tmp_path / "workspace")
+    assert result["ok"] is True
+    names = {check["name"] for check in result["checks"]}
+    assert {"database", "schema", "data", "renderer", "loopback"} <= names
+
+    class Args:
+        root = str(tmp_path / "workspace")
+        check = True
+        port = 8787
+        host = "127.0.0.1"
+        token = None
+        no_browser = False
+
+    assert web_workspace.cmd_workspace(Args()) == 0
+    output = capsys.readouterr().out
+    assert "Result: ok" in output
+    assert "[ok] schema" in output
+
+
+def test_workspace_self_check_flags_unusable_root(tmp_path: Path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("file in the way")
+    result = web_workspace.check_workspace(blocker)
+    assert result["ok"] is False
+    assert result["checks"][0]["name"] == "database"
+
+
 def test_inbox_add_and_status_actions(server):
     base, _ = server
     status, created, _ = request(base, "/api/inbox", method="POST", payload={"text": "Capture this"})
