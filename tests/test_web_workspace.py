@@ -127,6 +127,51 @@ def test_csrf_allows_valid_mutation_and_security_headers(server):
         assert "test-token-1234567890" not in html
 
 
+def test_tag_summary_and_sorting(server):
+    base, _ = server
+    request(base, "/api/notes", method="POST", payload={"title": "Charlie", "tags": ["alpha", "shared"]})
+    request(base, "/api/notes", method="POST", payload={"title": "alpha", "tags": ["shared"]})
+    request(base, "/api/notes", method="POST", payload={"title": "Bravo", "tags": ["beta"]})
+
+    _, tags, _ = request(base, "/api/tags")
+    assert tags["tags"] == [
+        {"tag": "shared", "count": 2},
+        {"tag": "alpha", "count": 1},
+        {"tag": "beta", "count": 1},
+    ]
+
+    _, by_title, _ = request(base, "/api/notes?sort=title")
+    assert [n["title"] for n in by_title["notes"]] == ["alpha", "Bravo", "Charlie"]
+
+    _, filtered, _ = request(base, "/api/notes?tag=shared")
+    assert sorted(n["title"] for n in filtered["notes"]) == ["Charlie", "alpha"]
+
+
+def test_export_and_import_round_trip(server):
+    base, _ = server
+    request(base, "/api/notes", method="POST", payload={"title": "Export me", "content": "# body", "tags": ["x"]})
+    status, exported, _ = request(base, "/api/export")
+    assert status == 200
+    assert exported["format"] == "hermes-workspace-v1"
+    assert [n["title"] for n in exported["notes"]] == ["Export me"]
+    assert exported["notes"][0]["content"] == "# body"
+    assert exported["notes"][0]["tags"] == ["x"]
+
+    # Import assigns fresh ids and preserves title/content/tags.
+    status, result, _ = request(base, "/api/import", method="POST", payload={
+        "notes": [{"title": "Export me", "content": "# body", "tags": ["x"]}],
+    })
+    assert status == 200
+    assert result["imported"] == 1
+    _, listed, _ = request(base, "/api/notes")
+    assert len(listed["notes"]) == 2
+    assert {n["title"] for n in listed["notes"]} == {"Export me"}
+    assert len({n["id"] for n in listed["notes"]}) == 2
+
+    # Malformed payloads are rejected, not silently accepted.
+    assert request(base, "/api/import", method="POST", payload={"notes": "nope"})[0] == 400
+
+
 def test_delete_moves_note_to_trash_and_restore_brings_it_back(server):
     base, _ = server
     _, created, _ = request(base, "/api/notes", method="POST", payload={"title": "Keep me", "content": "body"})

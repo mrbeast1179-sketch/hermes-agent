@@ -38,7 +38,10 @@ local-first editor that starts in under a second and needs no gateway.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/notes?q=&tag=` | List/search notes |
+| `GET` | `/api/notes?q=&tag=&sort=` | List/search notes (`sort`: `updated`, `created`, `title`) |
+| `GET` | `/api/tags` | Tag names with live counts |
+| `GET` | `/api/export` | Download a full workspace snapshot (JSON) |
+| `POST` | `/api/import` | Import notes from an export payload (new ids are assigned) |
 | `GET` | `/api/notes/{id}` | Read one note with rendered HTML |
 | `POST` | `/api/notes` | Create a note |
 | `PUT` | `/api/notes/{id}` | Update a note (optimistic `version` required) |
@@ -50,6 +53,17 @@ local-first editor that starts in under a second and needs no gateway.
 
 Updates use optimistic concurrency: a stale `version` returns HTTP 409 so a
 second tab cannot silently overwrite the first tab's edits.
+
+## Finding and moving notes
+
+The notes list has a text search, a tag filter populated from live tag
+counts, and a sort selector (recently updated, newest first, title A–Z).
+The filter survives re-renders, so a tag stays selected while you edit.
+
+Export writes a `hermes-workspace-v1` JSON snapshot of every note and
+inbox item; Import reads that snapshot back, assigning fresh ids so an
+import can never overwrite an existing note. Import rejects malformed
+payloads with HTTP 400 instead of silently accepting them.
 
 ## Deletion and drafts
 

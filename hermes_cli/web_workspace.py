@@ -177,6 +177,7 @@ class WorkspaceStore:
         query: str = "",
         tag: str = "",
         *,
+        sort: str = "updated",
         include_content: bool = False,
         include_deleted: bool = False,
     ) -> list[dict[str, Any]]:
@@ -204,7 +205,57 @@ class WorkspaceStore:
                 note.pop("content", None)
                 note.pop("html", None)
             result.append(note)
+        sort = str(sort or "updated").strip().lower()
+        if sort == "title":
+            result.sort(key=lambda n: (n["title"].casefold(), n["id"]))
+        elif sort == "created":
+            result.sort(key=lambda n: (n["created_at"], n["id"]), reverse=True)
+        else:
+            result.sort(key=lambda n: (n["updated_at"], n["id"]), reverse=True)
         return result
+
+    def tag_summary(self) -> list[dict[str, Any]]:
+        """Tag names with live counts for the filter control."""
+        counts: dict[str, int] = {}
+        for row in self._db.execute(
+            "SELECT tags FROM notes WHERE deleted_at IS NULL"
+        ).fetchall():
+            for tag in json.loads(row["tags"]):
+                counts[tag] = counts.get(tag, 0) + 1
+        return [
+            {"tag": tag, "count": count}
+            for tag, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+
+    def export_all(self) -> dict[str, Any]:
+        """A complete, portable snapshot of the workspace."""
+        return {
+            "format": "hermes-workspace-v1",
+            "exported_at": _now(),
+            "notes": self.list_notes(include_content=True),
+            "inbox": self.list_inbox(),
+        }
+
+    def import_notes(self, notes: Any) -> int:
+        """Import notes from an export payload. New ids are always assigned."""
+        if not isinstance(notes, list):
+            raise ValueError("notes must be an array")
+        imported = 0
+        for item in notes:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            content = item.get("content")
+            if not isinstance(content, str):
+                content = ""
+            tags = item.get("tags")
+            if not isinstance(tags, list):
+                tags = []
+            self.create_note(title[:MAX_TITLE], content[:MAX_CONTENT], tags)
+            imported += 1
+        return imported
 
     def update_note(
         self,
@@ -450,15 +501,15 @@ _HTML_PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hermes Workspace</title>
 <style>
-:root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--danger:#f85149;--ok:#3fb950}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,sans-serif}button,input,textarea{font:inherit;color:inherit}.shell{display:grid;grid-template-columns:220px minmax(280px,1fr) minmax(360px,1.5fr);height:100vh}.rail,.list,.editor{min-width:0;overflow:auto;border-right:1px solid var(--line)}.rail{padding:18px 12px}.brand{font-weight:700;font-size:17px;margin:0 8px 20px}.rail button{display:block;width:100%;text-align:left;margin:4px 0;padding:9px 10px;border:0;border-radius:7px;background:transparent;color:var(--muted);cursor:pointer}.rail button.active,.rail button:hover{background:#21262d;color:var(--text)}.rail .status{margin:24px 8px;color:var(--muted);font-size:12px}.list{padding:16px}.list-head{display:flex;gap:8px;margin-bottom:12px}.list-head input{flex:1;min-width:0;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px}.note-card{padding:10px;border:1px solid transparent;border-radius:7px;cursor:pointer}.note-card:hover{background:var(--panel)}.note-card.active{border-color:var(--accent);background:var(--panel)}.note-card strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.note-card small{color:var(--muted)}.editor{padding:18px 22px;border-right:0}.editor h1{font-size:20px;margin:0 0 12px}.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px}.toolbar input{flex:1;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px}.toolbar button,.primary{padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:#21262d;cursor:pointer}.toolbar .primary{background:#238636;border-color:#2ea043}.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}.pane{min-width:0}.pane label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}textarea{width:100%;height:calc(100vh - 230px);resize:vertical;padding:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;font:13px/1.55 ui-monospace,SFMono-Regular,monospace}.preview{height:calc(100vh - 230px);overflow:auto;padding:12px;border:1px solid var(--line);border-radius:8px}.preview pre{overflow:auto;background:var(--bg);padding:10px}.preview code{color:#79c0ff}.muted{color:var(--muted)}.error{color:var(--danger)}.success{color:var(--ok)}.chat-log{height:calc(100vh - 250px);overflow:auto;padding:10px;border:1px solid var(--line);border-radius:8px}.chat-log p{white-space:pre-wrap}.chat-form{display:flex;gap:8px;margin-top:10px}.chat-form input{flex:1;padding:9px;background:var(--bg);border:1px solid var(--line);border-radius:6px}.term{height:calc(100vh - 260px);overflow:auto;white-space:pre-wrap;padding:10px;background:#05070a;border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,monospace}@media(max-width:900px){.shell{grid-template-columns:150px 1fr}.editor{grid-column:1/-1}.split{grid-template-columns:1fr}textarea,.preview,.chat-log,.term{height:360px}}
+:root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--danger:#f85149;--ok:#3fb950}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,sans-serif}button,input,textarea{font:inherit;color:inherit}.shell{display:grid;grid-template-columns:220px minmax(280px,1fr) minmax(360px,1.5fr);height:100vh}.rail,.list,.editor{min-width:0;overflow:auto;border-right:1px solid var(--line)}.rail{padding:18px 12px}.brand{font-weight:700;font-size:17px;margin:0 8px 20px}.rail button{display:block;width:100%;text-align:left;margin:4px 0;padding:9px 10px;border:0;border-radius:7px;background:transparent;color:var(--muted);cursor:pointer}.rail button.active,.rail button:hover{background:#21262d;color:var(--text)}.rail .status{margin:24px 8px;color:var(--muted);font-size:12px}.list{padding:16px}.list-head{display:flex;gap:8px;margin-bottom:12px}.list-head input{flex:1;min-width:0;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px}.list-head select{flex:1;min-width:0;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px}.import-label{padding:8px 12px;border:1px solid var(--line);border-radius:6px;cursor:pointer}.import-label input{display:none}.note-card{padding:10px;border:1px solid transparent;border-radius:7px;cursor:pointer}.note-card:hover{background:var(--panel)}.note-card.active{border-color:var(--accent);background:var(--panel)}.note-card strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.note-card small{color:var(--muted)}.editor{padding:18px 22px;border-right:0}.editor h1{font-size:20px;margin:0 0 12px}.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px}.toolbar input{flex:1;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px}.toolbar button,.primary{padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:#21262d;cursor:pointer}.toolbar .primary{background:#238636;border-color:#2ea043}.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}.pane{min-width:0}.pane label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}textarea{width:100%;height:calc(100vh - 230px);resize:vertical;padding:12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;font:13px/1.55 ui-monospace,SFMono-Regular,monospace}.preview{height:calc(100vh - 230px);overflow:auto;padding:12px;border:1px solid var(--line);border-radius:8px}.preview pre{overflow:auto;background:var(--bg);padding:10px}.preview code{color:#79c0ff}.muted{color:var(--muted)}.error{color:var(--danger)}.success{color:var(--ok)}.chat-log{height:calc(100vh - 250px);overflow:auto;padding:10px;border:1px solid var(--line);border-radius:8px}.chat-log p{white-space:pre-wrap}.chat-form{display:flex;gap:8px;margin-top:10px}.chat-form input{flex:1;padding:9px;background:var(--bg);border:1px solid var(--line);border-radius:6px}.term{height:calc(100vh - 260px);overflow:auto;white-space:pre-wrap;padding:10px;background:#05070a;border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,monospace}@media(max-width:900px){.shell{grid-template-columns:150px 1fr}.editor{grid-column:1/-1}.split{grid-template-columns:1fr}textarea,.preview,.chat-log,.term{height:360px}}
 </style>
 </head>
 <body>
 <div class="shell">
 <nav class="rail"><h1 class="brand">Hermes</h1><button class="active" data-panel="notes">Notes</button><button data-panel="inbox">Inbox</button><button data-panel="trash">Trash</button><button data-panel="sessions">Sessions</button><button data-panel="terminal">Terminal</button><button data-panel="system">System</button><div class="status" id="status">Connecting…</div></nav>
-<section class="list" id="list-panel"><div class="list-head"><input id="note-search" placeholder="Search notes"></div><div id="note-list"></div></section>
+<section class="list" id="list-panel"><div class="list-head"><input id="note-search" placeholder="Search notes"></div><div class="list-head"><select id="note-tag-filter"><option value="">All tags</option></select><select id="note-sort"><option value="updated">Recently updated</option><option value="created">Newest first</option><option value="title">Title A–Z</option></select></div><div id="note-list"></div></section>
 <section class="editor" id="editor-panel">
-<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button></div><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
+<div id="notes-view"><h1>Notes</h1><div class="toolbar"><input id="note-title" placeholder="Note title"><input id="note-tags" placeholder="tags, comma separated"><button class="primary" id="save-note">Save</button><button id="new-note">New</button><button id="delete-note">Delete</button><button id="export-notes">Export</button><label class="import-label">Import<input id="import-notes" type="file" accept="application/json,.json"></label></div><div class="split"><div class="pane"><label for="note-content">MARKDOWN</label><textarea id="note-content" spellcheck="true"></textarea></div><div class="pane"><label>SAFE PREVIEW</label><div id="note-preview" class="preview"></div></div></div></div>
 <div id="inbox-view" hidden><h1>Inbox</h1><div id="inbox-list"></div></div>
 <div id="trash-view" hidden><h1>Trash</h1><p class="muted">Deleted notes stay here until you purge them.</p><div id="trash-list"></div></div>
 <div id="sessions-view" hidden><h1>Recent sessions</h1><div id="sessions-list"></div></div>
@@ -478,13 +529,14 @@ function draftKey(){return 'workspace-draft-'+(selected||'new');}
 function saveDraft(){try{localStorage.setItem(draftKey(),JSON.stringify({title:$('#note-title').value,tags:$('#note-tags').value,content:$('#note-content').value,at:Date.now()}));}catch(e){}}
 function clearDraft(){try{localStorage.removeItem(draftKey());}catch(e){}}
 function restoreDraft(){try{const raw=localStorage.getItem(draftKey());if(!raw)return false;const d=JSON.parse(raw);if(!d||(!d.title&&!d.content))return false;$('#note-title').value=d.title||'';$('#note-tags').value=d.tags||'';$('#note-content').value=d.content||'';return true;}catch(e){return false;}}
-async function loadNotes(){notes=(await api('/api/notes?q='+encodeURIComponent($('#note-search').value))).notes;$('#note-list').innerHTML=notes.map(n=>`<div class="note-card ${selected===n.id?'active':''}" data-id="${esc(n.id)}"><strong>${esc(n.title)}</strong><small>${esc(n.tags.join(', '))} · v${n.version}</small></div>`).join('')||'<p class="muted">No notes yet.</p>';$$('.note-card').forEach(el=>el.onclick=()=>selectNote(el.dataset.id));}
+async function loadTags(){const tags=(await api('/api/tags')).tags;const sel=$('#note-tag-filter');const current=sel.value;sel.innerHTML='<option value="">All tags</option>'+tags.map(t=>`<option value="${esc(t.tag)}">${esc(t.tag)} (${t.count})</option>`).join('');if(tags.some(t=>t.tag===current))sel.value=current;}
+async function loadNotes(){notes=(await api('/api/notes?q='+encodeURIComponent($('#note-search').value)+'&tag='+encodeURIComponent($('#note-tag-filter').value)+'&sort='+encodeURIComponent($('#note-sort').value))).notes;await loadTags();$('#note-list').innerHTML=notes.map(n=>`<div class="note-card ${selected===n.id?'active':''}" data-id="${esc(n.id)}"><strong>${esc(n.title)}</strong><small>${esc(n.tags.join(', '))} · v${n.version}</small></div>`).join('')||'<p class="muted">No notes yet.</p>';$$('.note-card').forEach(el=>el.onclick=()=>selectNote(el.dataset.id));}
 async function selectNote(id){selected=id;const {note}=await api('/api/notes/'+id);version=note.version;$('#note-title').value=note.title;$('#note-tags').value=note.tags.join(', ');$('#note-content').value=note.content;$('#note-preview').innerHTML=note.html;if(restoreDraft()){$('#status').textContent='Unsaved draft restored';$('#status').className='status success';}await loadNotes();}
 async function saveNote(){if(!$('#note-title').value.trim())return showError(new Error('Title is required'));const wasNew=!selected;const body={title:$('#note-title').value,content:$('#note-content').value,tags:$('#note-tags').value.split(',').map(x=>x.trim()).filter(Boolean),version};if(selected){const {note}=await api('/api/notes/'+selected,{method:'PUT',body:JSON.stringify(body)});version=note.version;$('#note-preview').innerHTML=note.html;}else{const {note}=await api('/api/notes',{method:'POST',body:JSON.stringify(body)});selected=note.id;version=note.version;$('#note-preview').innerHTML=note.html;}clearDraft();if(wasNew){try{localStorage.removeItem('workspace-draft-new');}catch(e){}}await loadNotes();$('#status').textContent='Saved';$('#status').className='status success';}
 async function newNote(){selected=null;version=1;$('#note-title').value='';$('#note-tags').value='';$('#note-content').value='';$('#note-preview').innerHTML='';clearDraft();}
 async function deleteNote(){if(!selected||!confirm('Move this note to trash?'))return;try{await api('/api/notes/'+selected,{method:'DELETE',body:JSON.stringify({version})});await newNote();await loadNotes();$('#status').textContent='Moved to trash';$('#status').className='status success';}catch(e){showError(e);}}
 async function switchPanel(name){$$('.rail button').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));for(const v of ['notes','inbox','trash','sessions','terminal','system']) $('#'+v+'-view').hidden=v!==name;$('#list-panel').hidden=name!=='notes';if(name==='inbox'){$('#inbox-list').innerHTML=(await api('/api/inbox')).items.map(i=>`<p>${esc(i.text)} <small class="muted">${esc(i.status)}</small></p>`).join('');}if(name==='trash'){const notes=(await api('/api/trash')).notes;$('#trash-list').innerHTML=notes.map(n=>`<div class="note-card"><strong>${esc(n.title)}</strong><small class="muted">deleted ${esc(n.deleted_at||'')}</small><div><button data-restore="${esc(n.id)}" data-version="${n.version}">Restore</button> <button data-purge="${esc(n.id)}" data-version="${n.version}">Purge</button></div></div>`).join('')||'<p class="muted">Trash is empty.</p>';$$('#trash-list [data-restore]').forEach(b=>b.onclick=async()=>{await api('/api/notes/'+b.dataset.restore+'/restore',{method:'POST',body:JSON.stringify({version:Number(b.dataset.version)})});await loadNotes();await switchPanel('trash');});$$('#trash-list [data-purge]').forEach(b=>b.onclick=async()=>{if(!confirm('Permanently delete this note?'))return;await api('/api/notes/'+b.dataset.purge+'/purge',{method:'DELETE',body:JSON.stringify({version:Number(b.dataset.version)})});await switchPanel('trash');});}if(name==='sessions'){$('#sessions-list').innerHTML=(await api('/api/sessions')).sessions.map(s=>`<p>${esc(s.title||s.id)} <small class="muted">${esc(s.source||'')}</small></p>`).join('');}if(name==='system'){$('#system-output').textContent=JSON.stringify((await api('/api/system')).system,null,2);}}
-$('#save-note').onclick=()=>saveNote().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);$('#note-title').oninput=saveDraft;$('#note-tags').oninput=saveDraft;let previewTimer=null;$('#note-content').oninput=()=>{saveDraft();clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
+$('#note-tag-filter').onchange=()=>loadNotes().catch(showError);$('#note-sort').onchange=()=>loadNotes().catch(showError);$('#export-notes').onclick=async()=>{try{const data=await api('/api/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='hermes-workspace.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#status').textContent='Exported '+data.notes.length+' notes';$('#status').className='status success';}catch(e){showError(e);}};$('#import-notes').onchange=async e=>{const file=e.target.files&&e.target.files[0];if(!file)return;try{const payload=JSON.parse(await file.text());const result=await api('/api/import',{method:'POST',body:JSON.stringify({notes:payload.notes||payload})});await loadTags();await loadNotes();$('#status').textContent='Imported '+result.imported+' notes';$('#status').className='status success';}catch(err){showError(err);}e.target.value='';};$('#save-note').onclick=()=>saveNote().catch(showError);$('#new-note').onclick=newNote;$('#delete-note').onclick=()=>deleteNote().catch(showError);$('#note-search').oninput=()=>loadNotes().catch(showError);$('#note-title').oninput=saveDraft;$('#note-tags').oninput=saveDraft;let previewTimer=null;$('#note-content').oninput=()=>{saveDraft();clearTimeout(previewTimer);previewTimer=setTimeout(()=>api('/api/markdown/preview',{method:'POST',body:JSON.stringify({content:$('#note-content').value})}).then(r=>{$('#note-preview').innerHTML=r.html;}).catch(showError),180);};$$('.rail button').forEach(b=>b.onclick=()=>switchPanel(b.dataset.panel));
 $('#run-term').onclick=()=>api('/api/terminal',{method:'POST',body:JSON.stringify({input:$('#term-input').value})}).then(r=>$('#term-output').textContent=r.output).catch(showError);
 $('#chat-form').onsubmit=async e=>{e.preventDefault();const input=$('#chat-input');const text=input.value;if(!text.trim())return;$('#chat-log').insertAdjacentHTML('beforeend','<p><b>You:</b> '+esc(text)+'</p>');input.value='';try{const r=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text})});$('#chat-log').insertAdjacentHTML('beforeend','<p><b>Hermes:</b> '+esc(r.reply)+'</p>');}catch(e){$('#chat-log').insertAdjacentHTML('beforeend','<p class="error">'+esc(e.message)+'</p>');}};
 (async()=>{try{$('#status').textContent='Ready';await loadNotes();}catch(e){showError(e);}})();
@@ -618,9 +670,23 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 items = self.store.list_notes(
                     query=(query.get("q") or [""])[0],
                     tag=(query.get("tag") or [""])[0],
+                    sort=(query.get("sort") or ["updated"])[0],
                     include_content=True,
                 )
                 self._json(200, {"notes": items})
+                return
+            if path == "/api/tags":
+                self._json(200, {"tags": self.store.tag_summary()})
+                return
+            if path == "/api/export":
+                payload = json.dumps(self.store.export_all(), ensure_ascii=False, indent=2)
+                body = payload.encode("utf-8")
+                self.send_response(200)
+                self._security_headers()
+                self.send_header("Content-Disposition", 'attachment; filename="hermes-workspace.json"')
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             if path.startswith("/api/notes/"):
                 note_id = path.removeprefix("/api/notes/")
@@ -671,6 +737,10 @@ class _WorkspaceHandler(BaseHTTPRequestHandler):
                 note_id = path.removeprefix("/api/notes/").removesuffix("/restore")
                 note = self.store.restore_note(note_id, data.get("version", 1))
                 self._json(200, {"note": note})
+                return
+            if path == "/api/import":
+                imported = self.store.import_notes(data.get("notes"))
+                self._json(200, {"imported": imported})
                 return
             if path == "/api/markdown/preview":
                 content = _clean_text(data.get("content", ""), "content", MAX_CONTENT, required=False)
